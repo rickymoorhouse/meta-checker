@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="en-gb">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Meta Checker</title>
+<meta name="description" content="Check how machine-readable a web page is: feeds, microformats, schema.org, OpenGraph, standard.site, SocialSpec and agent accessibility. Runs entirely in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=Fragment+Mono&display=swap">
+<style>
+/* Layout: one reading column; a summary band (score dial + section bars) above a checklist grouped by standard. */
+:root {
+  --paper: #f3f6f5;
+  --surface: #ffffff;
+  --ink: #1b2829;
+  --muted: #586a6b;
+  --line: #d6dfde;
+  --accent: #2f5b58;
+  --accent-ink: #ffffff;
+  --pass: #1d7548; --pass-bg: #e3f2e9;
+  --warn: #9a5b00; --warn-bg: #fbefd9;
+  --fail: #b0281f; --fail-bg: #fbe5e2;
+  --skip: #7d8b8b; --skip-bg: #ecf0ef;
+  --font-body: "Familjen Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Fragment Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --radius: 6px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #111819; --surface: #182223; --ink: #e2ebe9; --muted: #92a4a3; --line: #2a393a;
+    --accent: #86c3bb; --accent-ink: #0f1a1a;
+    --pass: #5fca96; --pass-bg: #173326; --warn: #e6aa4f; --warn-bg: #352a14;
+    --fail: #f18b80; --fail-bg: #3a1d1a; --skip: #6f8080; --skip-bg: #1f2a2b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #111819; --surface: #182223; --ink: #e2ebe9; --muted: #92a4a3; --line: #2a393a;
+  --accent: #86c3bb; --accent-ink: #0f1a1a;
+  --pass: #5fca96; --pass-bg: #173326; --warn: #e6aa4f; --warn-bg: #352a14;
+  --fail: #f18b80; --fail-bg: #3a1d1a; --skip: #6f8080; --skip-bg: #1f2a2b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 16px/1.55 var(--font-body);
+  padding: env(safe-area-inset-top, 0px) 16px env(safe-area-inset-bottom, 0px);
+}
+.wrap { max-width: 880px; margin: 0 auto; padding-block: 40px 64px; display: grid; gap: 28px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.2; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--skip-bg); padding: 0.05em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* Masthead */
+.mast { display: grid; gap: 8px; }
+.mast .eyebrow { font: 500 12px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.mast h1 { font-size: clamp(2rem, 5vw, 2.75rem); font-weight: 700; letter-spacing: -0.02em; }
+.mast p { margin: 0; color: var(--muted); max-width: 62ch; }
+
+/* Form */
+form { display: grid; gap: 12px; }
+.urlrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.urlrow input {
+  flex: 1 1 320px; min-width: 0; font: 400 16px/1.2 var(--font-mono); color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+}
+button {
+  font: 600 15px/1 var(--font-body); border-radius: var(--radius); cursor: pointer; padding: 12px 18px;
+  border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink);
+}
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.6; cursor: progress; }
+details.settings { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+details.settings summary { cursor: pointer; padding: 10px 14px; font-weight: 500; color: var(--muted); }
+.settings-body { padding: 4px 14px 16px; display: grid; gap: 14px; }
+.settings-body label { display: grid; gap: 6px; font-size: 14px; }
+.settings-body .inline { display: flex; gap: 8px; align-items: center; }
+.settings-body input[type=text], .settings-body textarea {
+  width: 100%; font: 400 13px/1.4 var(--font-mono); color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px;
+}
+.settings-body textarea { min-height: 96px; resize: vertical; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+
+/* Summary band */
+.summary {
+  display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 24px;
+}
+.dial { position: relative; width: 132px; height: 132px; }
+.dial svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.dial .track { fill: none; stroke: var(--line); stroke-width: 10; }
+.dial .arc { fill: none; stroke: var(--accent); stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset 600ms ease; }
+.dial .val { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+.dial .num { font: 700 36px/1 var(--font-body); font-variant-numeric: tabular-nums; }
+.dial .of { font: 400 12px/1.4 var(--font-mono); color: var(--muted); }
+.bars { display: grid; gap: 8px; min-width: 0; }
+.bars .target { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.bars .target strong { color: var(--ink); font-weight: 600; }
+.bar { display: grid; grid-template-columns: minmax(120px, 11rem) 1fr 3.5rem; gap: 12px; align-items: center; font-size: 14px; }
+.bar .track { height: 8px; background: var(--skip-bg); border-radius: 4px; overflow: hidden; }
+.bar .fill { height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width 600ms ease; }
+.bar .pct { font: 400 13px/1 var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.bar.optional .fill { background: var(--muted); }
+.bar.optional span:first-child::after { content: " (optional)"; color: var(--muted); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.actions button { padding: 8px 12px; font-size: 13px; }
+.notice { font-size: 14px; padding: 12px 14px; border-radius: var(--radius); background: var(--warn-bg); color: var(--ink); border: 1px solid var(--line); }
+
+/* Checklist */
+.section { display: grid; gap: 10px; }
+.section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.section-head h2 { font-size: 1.25rem; font-weight: 600; }
+.section-head .tag { font: 500 11px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 4px 8px; margin-left: 8px; vertical-align: 2px; }
+.section-head .sub { font: 400 13px/1 var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.section > p { margin: 0; color: var(--muted); font-size: 14px; max-width: 70ch; }
+.rows { display: grid; gap: 6px; }
+.row {
+  display: grid; grid-template-columns: 2rem 1fr; gap: 12px; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.row .body { min-width: 0; display: grid; gap: 4px; }
+.row .top { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.row .name { font-weight: 600; }
+.row .weight { font: 400 11px/1 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.row ul { margin: 0; padding-left: 1.1em; font-size: 14px; color: var(--muted); }
+.row ul li { overflow-wrap: anywhere; }
+.row .fix { font-size: 14px; margin: 0; }
+.row .fix::before { content: "Fix: "; font-weight: 600; }
+.row .links { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.pill {
+  width: 2rem; height: 2rem; border-radius: 50%; display: grid; place-content: center;
+  font: 700 14px/1 var(--font-mono); background: var(--skip-bg); color: var(--skip);
+}
+.pill[data-s=pass] { background: var(--pass-bg); color: var(--pass); }
+.pill[data-s=warn] { background: var(--warn-bg); color: var(--warn); }
+.pill[data-s=fail] { background: var(--fail-bg); color: var(--fail); }
+.pill[data-s=running] { animation: pulse 1.1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.row[data-s=fail] { border-left: 3px solid var(--fail); }
+.row[data-s=warn] { border-left: 3px solid var(--warn); }
+.row[data-s=pass] { border-left: 3px solid var(--pass); }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 6px; }
+footer p { margin: 0; }
+@media (max-width: 600px) {
+  .summary { grid-template-columns: 1fr; justify-items: start; padding: 18px; }
+  .bar { grid-template-columns: 1fr 3rem; }
+  .bar .track { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill[data-s=running] { animation: none; }
+  .dial .arc, .bar .fill { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <span class="eyebrow">Machine-readability audit</span>
+    <h1>Meta Checker</h1>
+    <p>Enter a page URL to check its feeds, microformats, schema.org data, OpenGraph tags, standard.site records, SocialSpec files and agent-friendly formats. All checks run in your browser.</p>
+  </header>
+
+  <form id="form" novalidate>
+    <div class="urlrow">
+      <input id="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" aria-label="Page URL"
+             placeholder="https://example.com/blog/my-post/" value="https://rickymoorhouse.uk/blog/2026/machine-readability/">
+      <button id="go" type="submit">Check page</button>
+    </div>
+    <details class="settings">
+      <summary>Fetching options</summary>
+      <div class="settings-body">
+        <p class="hint">Each URL is fetched directly first. Most sites block cross-origin reads of their HTML, so if a direct fetch fails the checker can retry through a CORS proxy. SocialSpec files must allow CORS, so a file that only loads through the proxy loses points.</p>
+        <p class="hint">Free public proxies come and go. corsproxy.io now needs a key (<code>https://corsproxy.io/?key=YOUR_KEY&amp;url={url}</code>). You can also point this at your own proxy, or paste the page source below.</p>
+        <label class="inline"><input id="useProxy" type="checkbox" checked> Retry blocked requests through a CORS proxy</label>
+        <label>Proxy URL template (<code>{url}</code> is replaced with the encoded target)
+          <input id="proxy" type="text" list="proxies" spellcheck="false" value="https://corsproxy.io/?url={url}">
+          <datalist id="proxies">
+            <option value="https://corsproxy.io/?url={url}"></option>
+            <option value="https://api.allorigins.win/raw?url={url}"></option>
+          </datalist>
+        </label>
+        <label>Page HTML (optional). Paste the page source to use instead of fetching it.
+          <textarea id="pasted" spellcheck="false" placeholder="<!doctype html>…"></textarea>
+        </label>
+      </div>
+    </details>
+  </form>
+
+  <section class="summary" id="summary" aria-live="polite">
+    <div class="dial" aria-hidden="true">
+      <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="arc" id="arc" cx="60" cy="60" r="52" stroke-dasharray="326.73" stroke-dashoffset="326.73"/></svg>
+      <div class="val"><span class="num" id="score">–</span><span class="of">out of 100</span></div>
+    </div>
+    <div class="bars">
+      <div class="target" id="target">No page checked yet. The checklist below shows what will be tested.</div>
+      <div id="bars"></div>
+      <div class="actions" id="actions" hidden>
+        <button type="button" class="ghost" id="copyMd">Copy report as Markdown</button>
+        <button type="button" class="ghost" id="copyLink">Copy link to this check</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="notice" class="notice" hidden></div>
+
+  <main id="checklist" class="wrap" style="padding:0"></main>
+
+  <footer>
+    <p>Covers the formats in <a href="https://rickymoorhouse.uk/blog/2026/machine-readability/">Machine-readable?</a> and the <a href="https://socialspec.org">SocialSpec</a> APIs. Weights: required ×3, recommended ×2, nice to have ×1. A warning earns half credit. Agent accessibility is scored separately and doesn't affect the main score.</p>
+    <p>Add <code>?url=https://…</code> to this page's address to run a check on load.</p>
+  </footer>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+// ---------- small utilities ----------
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Escape, then turn `backticks` into <code>.
+const fmt = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const trunc = (s, n = 90) => (s = String(s).replace(/\s+/g, " ").trim()).length > n ? s.slice(0, n - 1) + "…" : s;
+const looksHtml = t => /^\s*(<!doctype html|<html[\s>])/i.test(t || "");
+const enc = encodeURIComponent;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("metachecker:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("metachecker:" + k, JSON.stringify(v)); } catch {} }
+};
+
+// ---------- fetching ----------
+const settings = () => ({
+  useProxy: $("#useProxy").checked,
+  proxy: $("#proxy").value.trim() || "https://corsproxy.io/?url={url}",
+  pasted: $("#pasted").value.trim()
+});
+
+async function rawFetch(url, accept) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15000);
+  try {
+    const r = await fetch(url, { headers: accept ? { Accept: accept } : {}, signal: ctl.signal, cache: "no-store", redirect: "follow" });
+    const text = await r.text();
+    return { status: r.status, ok: r.ok, contentType: r.headers.get("content-type") || "", text, finalUrl: r.url || url };
+  } finally { clearTimeout(timer); }
+}
+
+let proxyTrouble = null;
+const proxied = (tpl, url) => tpl.includes("{url}") ? tpl.replace("{url}", enc(url)) : tpl + enc(url);
+
+// Direct first; on failure (usually CORS), via proxy. `cors` records whether the direct read worked.
+async function fetchSmart(url, opts = {}) {
+  const s = settings();
+  try {
+    const r = await rawFetch(url, opts.accept);
+    return { ...r, via: "direct", cors: true };
+  } catch (e) {
+    if (!s.useProxy) return { error: "blocked by CORS or unreachable (proxy is off)", cors: null, via: "none" };
+    try {
+      const r = await rawFetch(proxied(s.proxy, url), opts.accept);
+      // Auth, rate-limit and gateway errors come from the proxy itself, not the target site.
+      if ([401, 403, 407, 429].includes(r.status) || r.status >= 500) {
+        proxyTrouble = `The CORS proxy refused requests (HTTP ${r.status}). Public proxies often need an API key or rate-limit heavy use.`;
+        return { error: `blocked by CORS, and the proxy refused the request (HTTP ${r.status})`, cors: null, via: "none" };
+      }
+      return { ...r, finalUrl: url, via: "proxy", cors: false };
+    } catch (e2) {
+      proxyTrouble = "The CORS proxy couldn't be reached.";
+      return { error: "blocked by CORS or unreachable, and the proxy failed too", cors: null, via: "none" };
+    }
+  }
+}
+
+// ---------- parsers ----------
+function parseXml(text) {
+  const d = new DOMParser().parseFromString(text, "application/xml");
+  return d.getElementsByTagName("parsererror").length ? null : d;
+}
+function parseXmlFeed(text) {
+  if (!text || looksHtml(text)) return null;
+  const d = parseXml(text); if (!d) return null;
+  const root = d.documentElement, n = root.localName;
+  if (n === "rss") return { kind: "RSS " + (root.getAttribute("version") || ""), items: d.getElementsByTagName("item").length, title: d.querySelector("channel > title")?.textContent };
+  if (n === "feed") return { kind: "Atom", items: d.getElementsByTagNameNS("*", "entry").length, title: d.getElementsByTagNameNS("*", "title")[0]?.textContent };
+  if (n === "RDF") return { kind: "RSS 1.0", items: d.getElementsByTagNameNS("*", "item").length, title: d.getElementsByTagNameNS("*", "title")[0]?.textContent };
+  return null;
+}
+function parseJsonFeed(text) {
+  let j; try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== "object") return null;
+  return { version: j.version, title: j.title, items: Array.isArray(j.items) ? j.items.length : null, valid: /^https:\/\/jsonfeed\.org\/version\/1(\.1)?$/.test(j.version || "") && !!j.title && Array.isArray(j.items) };
+}
+function parseAtUri(s) {
+  const m = /^at:\/\/([^/\s]+)\/([^/\s]+)\/([^/?#\s]+)/.exec((s || "").trim());
+  return m ? { repo: m[1], collection: m[2], rkey: m[3], uri: m[0] } : null;
+}
+function jsonLdNodes(doc) {
+  const out = [], errors = [];
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach((s, i) => {
+    try {
+      const walk = n => { if (Array.isArray(n)) n.forEach(walk); else if (n && typeof n === "object") { if (n["@type"]) out.push(n); if (n["@graph"]) walk(n["@graph"]); } };
+      walk(JSON.parse(s.textContent));
+    } catch (e) { errors.push(`Block ${i + 1}: ${e.message}`); }
+  });
+  return { nodes: out, errors, count: doc.querySelectorAll('script[type="application/ld+json"]').length };
+}
+const types = n => [].concat(n["@type"] || []).map(String);
+
+// ---------- AT Protocol resolution (for standard.site) ----------
+const atCache = new Map();
+async function resolveDid(repo) {
+  if (repo.startsWith("did:")) return repo;
+  const r = await fetchSmart(`https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${enc(repo)}`);
+  return JSON.parse(r.text).did;
+}
+async function pdsFor(did) {
+  const url = did.startsWith("did:plc:") ? `https://plc.directory/${did}` : did.startsWith("did:web:") ? `https://${did.slice(8)}/.well-known/did.json` : null;
+  if (!url) throw new Error(`Unsupported DID method in ${did}`);
+  const doc = JSON.parse((await fetchSmart(url)).text);
+  const svc = (doc.service || []).find(s => s.id === "#atproto_pds" || s.type === "AtprotoPersonalDataServer");
+  if (!svc) throw new Error("DID document has no PDS endpoint");
+  return svc.serviceEndpoint.replace(/\/$/, "");
+}
+function getRecord(uri) {
+  if (!atCache.has(uri)) atCache.set(uri, (async () => {
+    const p = parseAtUri(uri); if (!p) throw new Error("Not an AT-URI");
+    const did = await resolveDid(p.repo);
+    const pds = await pdsFor(did);
+    const r = await fetchSmart(`${pds}/xrpc/com.atproto.repo.getRecord?repo=${enc(did)}&collection=${enc(p.collection)}&rkey=${enc(p.rkey)}`);
+    if (r.error) throw new Error(r.error);
+    if (r.status !== 200) throw new Error(`PDS returned HTTP ${r.status}`);
+    return JSON.parse(r.text).value;
+  })());
+  return atCache.get(uri);
+}
+
+// ---------- results ----------
+const R = {
+  pass: (detail, extra = {}) => ({ status: "pass", detail: [].concat(detail || []), ...extra }),
+  warn: (detail, fix, extra = {}) => ({ status: "warn", detail: [].concat(detail || []), fix, ...extra }),
+  fail: (detail, fix, extra = {}) => ({ status: "fail", detail: [].concat(detail || []), fix, ...extra }),
+  skip: (detail, extra = {}) => ({ status: "skip", detail: [].concat(detail || []), ...extra })
+};
+const unreachable = list => list.length > 0 && list.every(r => r.error);
+const viaNote = r => r.via === "proxy" ? " (through proxy)" : "";
+
+// Shared check for SocialSpec well-known files: exists + parses, correct Content-Type, CORS.
+async function specFile(c, path, o) {
+  const url = c.origin + path;
+  const r = await c.get(url);
+  const fix = o.fix;
+  if (r.error) return R.fail(`Couldn't read \`${path}\` cross-origin: it's missing or doesn't allow CORS (${r.error}).`, fix);
+  if (r.status !== 200) return R.fail(`\`${path}\` returned HTTP ${r.status}${viaNote(r)}.`, fix);
+  if (looksHtml(r.text)) return R.fail(`\`${path}\` returns an HTML page, probably a catch-all 404.`, fix);
+  const p = o.parse(r.text);
+  if (!p.ok) return R.fail(p.msg, fix);
+  const ct = (r.contentType || "").split(";")[0].trim().toLowerCase();
+  const ctOk = o.ctOk(ct);
+  const corsOk = r.cors === true;
+  const detail = [
+    p.msg,
+    `Content-Type \`${ct || "none"}\`${r.via === "proxy" ? " (as reported by the proxy)" : ""}${ctOk ? "" : `. Expected \`${o.ctWant}\``}.`,
+    corsOk ? "CORS allows cross-origin reads." : "CORS blocks cross-origin reads. Only the proxy could read it."
+  ];
+  const frac = 0.5 + (ctOk ? 0.25 : 0) + (corsOk ? 0.25 : 0);
+  const fixes = [!ctOk && `serve it as \`${o.ctWant}\``, !corsOk && "send `Access-Control-Allow-Origin: *`"].filter(Boolean);
+  return ctOk && corsOk ? R.pass(detail, { frac }) : R.warn(detail, fixes.join(" and ").replace(/^./, m => m.toUpperCase()) + ".", { frac });
+}
+
+// ---------- sections & checks ----------
+const SECTIONS = [
+  { id: "basics", name: "Page basics", blurb: "The core metadata every other format builds on." },
+  { id: "feeds", name: "Feeds", blurb: "RSS, Atom and JSON Feed, so readers can subscribe." },
+  { id: "structured", name: "Structured data", blurb: "Microformats (h-entry) and schema.org JSON-LD describing the content." },
+  { id: "social", name: "Social previews", blurb: "OpenGraph and Twitter card tags used for link previews." },
+  { id: "standard", name: "standard.site", blurb: "Publication and document records on AT Protocol, linked from the site." },
+  { id: "socialspec", name: "SocialSpec", blurb: "Single-file, single-request social APIs at well-known paths." },
+  { id: "agents", name: "Agent accessibility", optional: true, blurb: "Markdown versions, content negotiation and discovery files for AI agents. Scored separately." }
+];
+
+const W = { 3: "Required", 2: "Recommended", 1: "Nice to have" };
+
+const CHECKS = [
+  // --- Page basics
+  { id: "title", sec: "basics", w: 2, name: "Page title", doc: true, run(c) {
+    const t = c.doc.querySelector("title")?.textContent.trim();
+    return t ? R.pass(`“${trunc(t)}”`) : R.fail("No `<title>` element.", "Add a descriptive `<title>` to `<head>`.");
+  } },
+  { id: "lang", sec: "basics", w: 2, name: "Document language", doc: true, run(c) {
+    const l = c.doc.documentElement.getAttribute("lang");
+    return l ? R.pass(`\`lang="${l}"\``) : R.fail("No `lang` attribute on `<html>`.", "Add `lang`, for example `<html lang=\"en\">`.");
+  } },
+  { id: "description", sec: "basics", w: 2, name: "Meta description", doc: true, run(c) {
+    const d = c.meta("description");
+    if (!d) return R.fail("No `<meta name=\"description\">`.", "Add a one- or two-sentence summary as `<meta name=\"description\">`.");
+    return d.length > 300 ? R.warn(`${d.length} characters, longer than most consumers display.`, "Keep it under about 160–300 characters.") : R.pass(`“${trunc(d)}” (${d.length} characters)`);
+  } },
+  { id: "canonical", sec: "basics", w: 3, name: "Canonical URL", doc: true, run(c) {
+    const h = c.doc.querySelector('link[rel~="canonical" i]')?.getAttribute("href");
+    if (!h) return R.fail("No `<link rel=\"canonical\">`.", "Add `<link rel=\"canonical\" href=\"…\">` with the page's absolute URL.");
+    const a = c.abs(h);
+    const d = [`\`${a}\``];
+    if (!/^https?:\/\//i.test(h)) return R.warn(d.concat("The href is relative."), "Use an absolute URL.");
+    if (a.replace(/\/$/, "") !== c.url.replace(/\/$/, "")) d.push("This differs from the URL you checked.");
+    return R.pass(d);
+  } },
+  { id: "relme", sec: "basics", w: 1, name: "rel=me identity links", doc: true, run(c) {
+    const els = [...c.doc.querySelectorAll('link[rel~="me" i], a[rel~="me" i]')];
+    const hosts = [...new Set(els.map(e => { try { return new URL(c.abs(e.getAttribute("href"))).hostname; } catch { return null; } }).filter(Boolean))];
+    return els.length ? R.pass(`${els.length} link${els.length > 1 ? "s" : ""}: ${hosts.slice(0, 8).join(", ")}`) :
+      R.fail("No `rel=\"me\"` links.", "Link your profiles with `rel=\"me\"` so other sites can verify you own them.", { links: [["IndieWeb rel=me", "https://indieweb.org/rel-me"]] });
+  } },
+
+  // --- Feeds
+  { id: "feedDiscovery", sec: "feeds", w: 3, name: "Feed auto-discovery", doc: true, run(c) {
+    const inHead = c.feeds.filter(f => f.el === "link");
+    const list = c.feeds.map(f => `\`${f.type}\` ${f.href}${f.el === "a" ? " (link in body)" : ""}`);
+    if (inHead.length) return R.pass(list);
+    if (c.feeds.length) return R.warn(list.concat("Feeds are only linked from the page body."), `Add \`<link rel="alternate" type="${c.feeds[0].type}" href="${c.feeds[0].href}">\` to \`<head>\` so feed readers find it.`);
+    return R.fail("No `<link rel=\"alternate\">` pointing to a feed.", "Add `<link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed.xml\">` to `<head>`.");
+  } },
+  { id: "xmlFeed", sec: "feeds", w: 3, name: "RSS or Atom feed", async run(c) {
+    const disc = c.feeds.filter(f => /rss|atom/.test(f.type)).map(f => f.href);
+    const cands = [...new Set(disc.concat(["/feed.xml", "/feed", "/rss.xml", "/atom.xml", "/index.xml"].map(p => c.origin + p)))];
+    const reached = [];
+    for (const u of cands) {
+      const r = await c.get(u);
+      reached.push(r);
+      if (r.status !== 200) continue;
+      const f = parseXmlFeed(r.text);
+      if (f) {
+        const d = [`${f.kind.trim()} at \`${u}\`${viaNote(r)}`, `${f.items} item${f.items === 1 ? "" : "s"}${f.title ? `, titled “${trunc(f.title, 60)}”` : ""}`];
+        const links = [["W3C feed validator", `https://validator.w3.org/feed/check.cgi?url=${enc(u)}`]];
+        return f.items ? R.pass(d, { links }) : R.warn(d, "The feed has no items.", { links });
+      }
+    }
+    if (unreachable(reached)) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
+    return R.fail(`No RSS or Atom feed found (tried ${cands.length} locations).`, "Publish an RSS 2.0 or Atom feed and link it from `<head>`.", { links: [["RSS 2.0 spec", "https://www.rssboard.org/rss-specification"]] });
+  } },
+  { id: "jsonFeed", sec: "feeds", w: 2, name: "JSON Feed", async run(c) {
+    const disc = c.feeds.filter(f => /json/.test(f.type)).map(f => f.href);
+    const cands = [...new Set(disc.concat(["/feed.json", "/jsonfeed", "/index.json"].map(p => c.origin + p)))];
+    const reached = [];
+    for (const u of cands) {
+      const r = await c.get(u);
+      reached.push(r);
+      if (r.status !== 200) continue;
+      const f = parseJsonFeed(r.text);
+      if (!f || !f.version) continue;
+      const links = [["JSON Feed validator", `https://validator.jsonfeed.org/?url=${enc(u)}`]];
+      const d = [`\`${u}\`${viaNote(r)}`, `Version \`${f.version}\`, ${f.items ?? 0} items${f.title ? `, titled “${trunc(f.title, 60)}”` : ""}`];
+      if (!f.valid) return R.warn(d, "A valid feed needs a jsonfeed.org `version`, a `title` and an `items` array.", { links });
+      if (!disc.length) return R.warn(d.concat("Not linked from the page."), "Add `<link rel=\"alternate\" type=\"application/feed+json\" href=\"…\">`.", { links });
+      return R.pass(d, { links });
+    }
+    if (unreachable(reached)) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
+    return R.fail("No JSON Feed found.", "Publish a JSON Feed and link it with `type=\"application/feed+json\"`.", { links: [["jsonfeed.org", "https://www.jsonfeed.org"]] });
+  } },
+
+  // --- Structured data
+  { id: "hentry", sec: "structured", w: 2, name: "h-entry microformat", doc: true, run(c) {
+    const links = [["IndieWebify validator", `https://indiewebify.me/validate-h-entry/?url=${enc(c.url)}`]];
+    const e = c.doc.querySelector(".h-entry");
+    if (!e) {
+      const feed = c.doc.querySelector(".h-feed");
+      if (c.isRoot && feed) return R.pass(`h-feed found${feed.querySelectorAll(".h-entry").length ? ` with ${feed.querySelectorAll(".h-entry").length} entries` : ""}.`, { links });
+      return R.fail("No element with class `h-entry`.", "Wrap the post in `class=\"h-entry\"` and mark up `p-name`, `e-content`, `dt-published` and `u-url`.", { links: links.concat([["h-entry spec", "https://microformats.org/wiki/h-entry"]]) });
+    }
+    const props = ["p-name", "e-content", "dt-published", "u-url"];
+    const missing = props.filter(p => !e.querySelector("." + p) && !e.classList.contains(p));
+    const found = props.filter(p => !missing.includes(p));
+    if (!missing.length) return R.pass(`h-entry with ${found.map(p => "`" + p + "`").join(", ")}`, { links });
+    return R.warn([`Found: ${found.map(p => "`" + p + "`").join(", ") || "none"}`, `Missing: ${missing.map(p => "`" + p + "`").join(", ")}`], "Add the missing properties inside the h-entry.", { links });
+  } },
+  { id: "hcard", sec: "structured", w: 1, name: "Author h-card", doc: true, run(c) {
+    const a = c.doc.querySelector(".h-entry .p-author.h-card, .h-entry .p-author .h-card, .h-entry .h-card");
+    if (a) return R.pass(`Author: ${trunc(a.querySelector(".p-name")?.textContent || a.textContent, 50)}`);
+    const any = c.doc.querySelector(".h-card");
+    return any ? R.warn(`h-card found (“${trunc(any.textContent, 40)}”), but not marked as the post's author.`, "Mark the author inside the h-entry with `class=\"p-author h-card\"`.")
+      : R.fail("No h-card.", "Add an author h-card, for example `<a class=\"p-author h-card\" href=\"/\">Your Name</a>`.");
+  } },
+  { id: "jsonld", sec: "structured", w: 3, name: "JSON-LD present and valid", doc: true, run(c) {
+    const links = [["Schema.org validator", `https://validator.schema.org/#url=${enc(c.url)}`]];
+    const { nodes, errors, count } = c.ld;
+    if (!count) return R.fail("No `<script type=\"application/ld+json\">` blocks.", "Describe the page with schema.org JSON-LD.", { links });
+    if (errors.length) return R.fail(errors, "Fix the JSON syntax errors.", { links });
+    return R.pass(`${count} block${count > 1 ? "s" : ""}, types: ${[...new Set(nodes.flatMap(types))].map(t => "`" + t + "`").join(", ") || "none"}`, { links });
+  } },
+  { id: "article", sec: "structured", w: 2, name: "Article schema", doc: true, run(c) {
+    const links = [["TechArticle", "https://schema.org/TechArticle"]];
+    const art = c.ld.nodes.find(n => types(n).some(t => /(Article|BlogPosting|Report)$/.test(t)));
+    if (!art) {
+      const site = c.ld.nodes.find(n => types(n).some(t => /^(WebSite|Blog|Person|Organization|ProfilePage|CollectionPage)$/.test(t)));
+      if (c.isRoot && site) return R.pass(`Site-level type \`${types(site).join(", ")}\` (a home page needn't be an Article).`, { links });
+      return R.fail("No Article, BlogPosting or TechArticle node.", "Add a JSON-LD node with `@type` `BlogPosting` or `TechArticle`.", { links });
+    }
+    const req = ["headline", "datePublished", "author"].filter(k => !art[k]);
+    const rec = ["description", "image", "dateModified", "url"].filter(k => !art[k]);
+    const d = [`\`${types(art).join(", ")}\`${art.headline ? `: “${trunc(art.headline, 60)}”` : ""}`];
+    if (rec.length) d.push(`Optional properties not set: ${rec.map(k => "`" + k + "`").join(", ")}`);
+    return req.length ? R.warn(d.concat(`Missing ${req.map(k => "`" + k + "`").join(", ")}`), `Add ${req.join(", ")}.`, { links }) : R.pass(d, { links });
+  } },
+
+  // --- Social previews
+  { id: "ogCore", sec: "social", w: 3, name: "OpenGraph basics", doc: true, run(c) {
+    const links = [["opengraph.dev", "https://opengraph.dev"], ["ogp.me", "https://ogp.me"]];
+    const keys = ["og:title", "og:type", "og:url", "og:image"];
+    const have = keys.filter(k => c.meta(k));
+    const missing = keys.filter(k => !have.includes(k));
+    const d = have.map(k => `\`${k}\`: ${trunc(c.meta(k), 70)}`);
+    if (!missing.length) return R.pass(d, { links });
+    if (!have.length) return R.fail("No OpenGraph tags.", "Add `og:title`, `og:type`, `og:url` and `og:image` meta tags.", { links });
+    return R.warn(d.concat(`Missing ${missing.map(k => "`" + k + "`").join(", ")}`), `Add ${missing.join(", ")}.`, { links });
+  } },
+  { id: "ogDesc", sec: "social", w: 2, name: "OpenGraph description", doc: true, run(c) {
+    const d = c.meta("og:description");
+    return d ? R.pass(`“${trunc(d)}”`) : R.fail("No `og:description`.", "Add `<meta property=\"og:description\" content=\"…\">`.");
+  } },
+  { id: "ogImage", sec: "social", w: 1, name: "Share image details", doc: true, run(c) {
+    const img = c.meta("og:image");
+    if (!img) return R.skip("No `og:image` to inspect.");
+    const d = [`\`${trunc(img, 80)}\``];
+    const extras = ["og:image:width", "og:image:height", "og:image:alt"].filter(k => c.meta(k));
+    if (extras.length) d.push(`Also sets ${extras.map(k => "`" + k + "`").join(", ")}`);
+    return /^https?:\/\//i.test(img) ? R.pass(d) : R.warn(d.concat("The URL is relative."), "Use an absolute URL; most scrapers ignore relative image paths.");
+  } },
+  { id: "twitter", sec: "social", w: 1, name: "Twitter/X card", doc: true, run(c) {
+    const t = c.meta("twitter:card");
+    return t ? R.pass(`\`twitter:card\` = \`${t}\``) : R.fail("No `twitter:card`.", "Add `<meta name=\"twitter:card\" content=\"summary_large_image\">`.");
+  } },
+
+  // --- standard.site
+  { id: "pubWellKnown", sec: "standard", w: 3, name: "Publication verification file", async run(c) {
+    const links = [["standard.site", "https://standard.site"], ["Site validator", "https://site-validator.fly.dev/"]];
+    const r = await c.pubWellKnown;
+    const fix = "Serve the publication's AT-URI as plain text at `/.well-known/site.standard.publication`.";
+    if (r.error) return R.skip(`Couldn't check: ${r.error}.`, { links });
+    if (r.status !== 200) return R.fail(`\`/.well-known/site.standard.publication\` returned HTTP ${r.status}.`, fix, { links });
+    const p = parseAtUri(r.text);
+    if (!p) return R.fail(`Response isn't an AT-URI: “${trunc(r.text, 60)}”.`, fix, { links });
+    if (p.collection !== "site.standard.publication") return R.warn(`\`${p.uri}\``, "The AT-URI should point to a `site.standard.publication` record.", { links });
+    return R.pass(`\`${p.uri}\``, { links });
+  } },
+  { id: "pubRecord", sec: "standard", w: 2, name: "Publication record", async run(c) {
+    const uri = c.pubUri();
+    if (!uri) return R.skip("No publication AT-URI found to resolve.");
+    try {
+      const v = await getRecord(uri);
+      const d = [`Name: “${trunc(v.name || "", 60)}”`, `URL: \`${v.url || "missing"}\``];
+      const links = [["View on pds.ls", `https://pds.ls/${uri}`]];
+      if (!v.name || !v.url) return R.warn(d, "The publication record needs `name` and `url`.", { links });
+      const host = h => h.replace(/^www\./, "");
+      if (host(new URL(v.url).hostname) !== host(c.host)) return R.warn(d, `The record's \`url\` should be on ${c.host}.`, { links });
+      return R.pass(d, { links });
+    } catch (e) { return R.fail(`Couldn't resolve \`${uri}\`: ${e.message}.`, "Check that the record exists in your PDS."); }
+  } },
+  { id: "pubLink", sec: "standard", w: 1, name: "Publication link tag", doc: true, async run(c) {
+    const h = c.doc.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href");
+    if (!h) return R.fail("No `<link rel=\"site.standard.publication\">`.", "Add a link tag with the publication's AT-URI.");
+    const wk = parseAtUri((await c.pubWellKnown).text || "");
+    if (wk && wk.uri !== h.trim()) return R.warn([`\`${h}\``, `The well-known file says \`${wk.uri}\`.`], "Make the link tag and the well-known file point to the same record.");
+    return R.pass(`\`${h}\`${wk ? " (matches the well-known file)" : ""}`);
+  } },
+  { id: "docLink", sec: "standard", w: 2, name: "Document record", doc: true, async run(c) {
+    const h = c.doc.querySelector('link[rel="site.standard.document"]')?.getAttribute("href");
+    if (!h) return c.isRoot ? R.skip("Document links belong on individual posts. Check a post URL to test this.")
+      : R.fail("No `<link rel=\"site.standard.document\">`.", "Publish a `site.standard.document` record and link its AT-URI from the post's `<head>`.", { links: [["Publishing guide", "https://piccalil.li/blog/publishing-on-the-atmosphere-with-standardsite/"]] });
+    const links = [["View on pds.ls", `https://pds.ls/${h}`]];
+    try {
+      const v = await getRecord(h);
+      const d = [`\`${h}\``, `Title: “${trunc(v.title || "", 60)}”${v.publishedAt ? `, published ${String(v.publishedAt).slice(0, 10)}` : ""}`];
+      const pub = c.pubUri();
+      if (pub && v.site && v.site !== pub && !c.url.startsWith(v.site)) return R.warn(d.concat(`Record's \`site\` is \`${v.site}\`.`), "Set the document's `site` to your publication's AT-URI.", { links });
+      return R.pass(d, { links });
+    } catch (e) { return R.fail([`\`${h}\``, `Couldn't resolve: ${e.message}.`], "Check that the record exists in your PDS.", { links }); }
+  } },
+
+  // --- SocialSpec
+  { id: "ssFeed", sec: "socialspec", w: 2, name: "Feed at /feed.xml or /feed.json", async run(c) {
+    const links = [["socialspec.org", "https://socialspec.org"]];
+    const tried = [], reached = [];
+    for (const p of ["/feed.xml", "/feed.json"]) {
+      const r = await c.get(c.origin + p);
+      reached.push(r);
+      tried.push(`\`${p}\`: ${r.error ? "unreachable" : "HTTP " + r.status}`);
+      if (r.status === 200 && (parseXmlFeed(r.text) || parseJsonFeed(r.text)?.version)) return R.pass(`Valid feed at \`${p}\`${viaNote(r)}`, { links });
+    }
+    if (unreachable(reached)) return R.skip(tried);
+    return R.fail(tried, "Serve your feed (or a redirect to it) at `/feed.xml` or `/feed.json`, where SocialSpec clients look first.", { links });
+  } },
+  { id: "following", sec: "socialspec", w: 3, name: "following.opml (FollowSpec)", async run(c) {
+    const res = await specFile(c, "/.well-known/following.opml", {
+      ctWant: "text/x-opml", ctOk: ct => /opml|xml/.test(ct),
+      fix: "Publish an OPML subscription list at `/.well-known/following.opml`.",
+      parse(t) {
+        const d = parseXml(t);
+        if (!d || d.documentElement.localName !== "opml") return { ok: false, msg: "Not a valid OPML document." };
+        const n = d.querySelectorAll("outline[xmlUrl]").length;
+        return n ? { ok: true, msg: `OPML ${d.documentElement.getAttribute("version") || ""} listing ${n} feed${n > 1 ? "s" : ""}.` } : { ok: false, msg: "OPML has no `<outline xmlUrl>` entries." };
+      }
+    });
+    res.links = [["followspec.org", "https://followspec.org"]];
+    if (c.doc?.querySelector('link[rel~="following"], link[rel~="blogroll"]')) res.detail.push("Also linked from the page with `rel=\"following\"` or `rel=\"blogroll\"`.");
+    return res;
+  } },
+  { id: "about", sec: "socialspec", w: 3, name: "about.md (AboutSpec)", async run(c) {
+    const res = await specFile(c, "/.well-known/about.md", {
+      ctWant: "text/markdown", ctOk: ct => ct === "text/markdown",
+      fix: "Publish a Markdown profile at `/.well-known/about.md`.",
+      parse(t) {
+        if (!t.trim()) return { ok: false, msg: "File is empty." };
+        const links = (t.match(/\]\([^)]+\)|https?:\/\/\S+/g) || []).length;
+        const fm = /^---\n[\s\S]*?\n---/.test(t) ? "front matter, " : "";
+        return { ok: true, msg: `${t.length.toLocaleString()} characters, ${fm}${links} link${links === 1 ? "" : "s"}.` };
+      }
+    });
+    res.links = [["aboutspec.org", "https://aboutspec.org"]];
+    return res;
+  } },
+  { id: "contact", sec: "socialspec", w: 3, name: "contact.vcf (ContactSpec)", async run(c) {
+    const res = await specFile(c, "/.well-known/contact.vcf", {
+      ctWant: "text/vcard", ctOk: ct => ct === "text/vcard",
+      fix: "Publish a vCard (3.0 or newer) at `/.well-known/contact.vcf`.",
+      parse(t) {
+        if (!/BEGIN:VCARD/i.test(t) || !/END:VCARD/i.test(t)) return { ok: false, msg: "Not a vCard (missing `BEGIN:VCARD` or `END:VCARD`)." };
+        const v = (/^VERSION:([\d.]+)/mi.exec(t) || [])[1];
+        if (!v || parseFloat(v) < 3) return { ok: false, msg: `vCard version ${v || "missing"}. SocialSpec needs 3.0 or newer.` };
+        const fn = (/^FN[;:](?:[^:\n]*:)?(.+)$/mi.exec(t) || [])[1];
+        if (!fn) return { ok: false, msg: "vCard has no `FN` (formatted name)." };
+        const props = ["EMAIL", "URL", "TEL", "IMPP", "X-SOCIALPROFILE"].filter(p => new RegExp("^" + p + "[;:]", "mi").test(t));
+        return { ok: true, msg: `vCard ${v} for “${trunc(fn.trim(), 40)}”${props.length ? ` with ${props.join(", ")}` : ""}.` };
+      }
+    });
+    res.links = [["contactspec.org", "https://contactspec.org"]];
+    return res;
+  } },
+
+  // --- Agent accessibility (optional)
+  { id: "mdAlt", sec: "agents", w: 2, name: "Markdown alternate", doc: true, async run(c) {
+    const h = c.doc.querySelector('link[rel~="alternate"][type="text/markdown" i]')?.getAttribute("href");
+    if (!h) return R.fail("No `<link rel=\"alternate\" type=\"text/markdown\">`.", "Generate a Markdown copy of each page and link it from `<head>`.", { links: [["isitagentready", "https://isitagentready.com/"]] });
+    const u = c.abs(h);
+    const r = await c.get(u);
+    if (r.error) return R.skip(`Couldn't check \`${u}\`: ${r.error}.`);
+    if (r.status !== 200 || looksHtml(r.text)) return R.warn(`\`${u}\` returned ${r.error || "HTTP " + r.status}${looksHtml(r.text) ? " with HTML" : ""}.`, "Make sure the linked Markdown file is published.");
+    return R.pass([`\`${u}\`${viaNote(r)}`, `${r.text.length.toLocaleString()} characters of Markdown.`]);
+  } },
+  { id: "mdNeg", sec: "agents", w: 2, name: "Markdown content negotiation", async run(c) {
+    const r = await c.get(c.url, { accept: "text/markdown" });
+    if (r.error) return R.skip(`Couldn't request the page: ${r.error}.`);
+    const ct = (r.contentType || "").split(";")[0];
+    const moved = r.finalUrl && r.finalUrl !== c.url && /\.md($|\?)/.test(r.finalUrl);
+    if (!looksHtml(r.text) && (ct === "text/markdown" || moved || r.status === 200)) {
+      return R.pass([`\`Accept: text/markdown\` returns \`${ct || "unknown"}\`${moved ? ` from \`${r.finalUrl}\`` : ""}.`]);
+    }
+    if (r.via === "proxy") return R.warn("The proxy returned HTML. It may not forward the `Accept` header, so this result isn't conclusive.", "Allow CORS on the page, or check it directly with `curl -H 'Accept: text/markdown'`.");
+    return R.fail(`\`Accept: text/markdown\` still returns \`${ct || "HTML"}\`.`, "Serve (or redirect to) the Markdown version when a client sends `Accept: text/markdown`.");
+  } },
+  { id: "llms", sec: "agents", w: 2, name: "llms.txt", async run(c) {
+    const links = [["llmstxt.org", "https://llmstxt.org"]];
+    const r = await c.get(c.origin + "/llms.txt");
+    const fix = "Publish `/llms.txt`: an H1 with the site name, a short summary and lists of links to key pages.";
+    if (r.error) return R.skip(`Couldn't check \`/llms.txt\`: ${r.error}.`, { links });
+    if (r.status !== 200 || looksHtml(r.text) || !r.text.trim()) return R.fail(`\`/llms.txt\` returned ${r.status !== 200 ? "HTTP " + r.status : "no usable text"}.`, fix, { links });
+    const first = r.text.split("\n").find(l => l.trim());
+    const n = (r.text.match(/\]\([^)]+\)/g) || []).length;
+    const d = [`${r.text.length.toLocaleString()} characters, ${n} link${n === 1 ? "" : "s"}${viaNote(r)}.`];
+    return /^#\s+\S/.test(first) ? R.pass([`Title: “${trunc(first.replace(/^#\s+/, ""), 60)}”`].concat(d), { links })
+      : R.warn(d.concat("Doesn't start with an H1."), "Start the file with `# Site name`.", { links });
+  } },
+  { id: "aiCatalog", sec: "agents", w: 2, name: "AI catalog", async run(c) {
+    const h = c.doc?.querySelector('link[rel~="ai-catalog"]')?.getAttribute("href");
+    const u = h ? c.abs(h) : c.origin + "/.well-known/ai-catalog.json";
+    const r = await c.get(u);
+    const fix = "Publish `/.well-known/ai-catalog.json` listing your agent-facing endpoints, such as MCP server cards, and link it with `rel=\"ai-catalog\"`.";
+    if (r.error) return R.skip(`Couldn't check \`${u}\`: ${r.error}.`);
+    if (r.status !== 200) return R.fail(`\`${u}\` returned HTTP ${r.status}.`, fix);
+    let j; try { j = JSON.parse(r.text); } catch { return R.fail(`\`${u}\` isn't valid JSON.`, fix); }
+    const entries = Array.isArray(j.entries) ? j.entries : null;
+    const d = [`\`${u}\`${viaNote(r)}`, `Spec version \`${j.specVersion || "missing"}\`, ${entries ? entries.length : 0} entr${entries?.length === 1 ? "y" : "ies"}${entries?.length ? ": " + entries.slice(0, 4).map(e => e.displayName || e.identifier).join(", ") : ""}`];
+    if (!j.specVersion || !entries) return R.warn(d, "Include `specVersion` and an `entries` array.");
+    if (!h) return R.warn(d.concat("Not linked from the page."), "Add `<link rel=\"ai-catalog\" type=\"application/ai-catalog+json\" href=\"/.well-known/ai-catalog.json\">`.");
+    return R.pass(d);
+  } }
+];
+
+// ---------- rendering ----------
+const ICON = { pass: "✓", warn: "!", fail: "✕", skip: "–", pending: "·", running: "…" };
+const results = {};
+
+function renderSkeleton() {
+  $("#checklist").innerHTML = SECTIONS.map(s => `
+    <section class="section" id="sec-${s.id}">
+      <div class="section-head">
+        <h2>${esc(s.name)}${s.optional ? '<span class="tag">Optional</span>' : ""}</h2>
+        <span class="sub" id="sub-${s.id}"></span>
+      </div>
+      <p>${esc(s.blurb)}</p>
+      <div class="rows">${CHECKS.filter(c => c.sec === s.id).map(c => `<div class="row" id="row-${c.id}"></div>`).join("")}</div>
+    </section>`).join("");
+  CHECKS.forEach(c => renderRow(c, { status: "pending", detail: ["Not checked yet."] }));
+}
+
+function renderRow(chk, r) {
+  results[chk.id] = r;
+  const el = $("#row-" + chk.id);
+  el.dataset.s = r.status;
+  el.innerHTML = `
+    <div class="pill" data-s="${r.status}" aria-label="${r.status}">${ICON[r.status]}</div>
+    <div class="body">
+      <div class="top"><span class="name">${esc(chk.name)}</span><span class="weight">${W[chk.w]}</span></div>
+      ${r.detail?.length ? `<ul>${r.detail.map(d => `<li>${fmt(d)}</li>`).join("")}</ul>` : ""}
+      ${r.fix && r.status !== "pass" ? `<p class="fix">${fmt(r.fix)}</p>` : ""}
+      ${r.links?.length ? `<div class="links">${r.links.map(([l, h]) => `<a href="${esc(h)}" target="_blank" rel="noopener">${esc(l)} ↗</a>`).join("")}</div>` : ""}
+    </div>`;
+}
+
+const credit = r => r.frac != null ? r.frac : r.status === "pass" ? 1 : r.status === "warn" ? 0.5 : 0;
+function tally(checks) {
+  let got = 0, max = 0;
+  checks.forEach(c => { const r = results[c.id]; if (r && ["pass", "warn", "fail"].includes(r.status)) { got += credit(r) * c.w; max += c.w; } });
+  return { got, max, pct: max ? Math.round(got / max * 100) : null };
+}
+
+function renderSummary() {
+  const core = tally(CHECKS.filter(c => !SECTIONS.find(s => s.id === c.sec).optional));
+  $("#score").textContent = core.pct ?? "–";
+  $("#arc").style.strokeDashoffset = 326.73 * (1 - (core.pct ?? 0) / 100);
+  $("#bars").innerHTML = SECTIONS.map(s => {
+    const t = tally(CHECKS.filter(c => c.sec === s.id));
+    $("#sub-" + s.id).textContent = t.max ? `${+t.got.toFixed(1)} / ${t.max} points` : "";
+    return `<div class="bar${s.optional ? " optional" : ""}"><span>${esc(s.name)}</span><div class="track"><div class="fill" style="width:${t.pct ?? 0}%"></div></div><span class="pct">${t.pct == null ? "–" : t.pct + "%"}</span></div>`;
+  }).join("");
+}
+
+// ---------- run ----------
+let lastUrl = null;
+async function run(rawUrl) {
+  let url;
+  try { url = new URL(/^https?:\/\//i.test(rawUrl) ? rawUrl : "https://" + rawUrl).href; }
+  catch { showNotice("That doesn't look like a URL. Try something like https://example.com/blog/post/."); return; }
+  lastUrl = url;
+  $("#url").value = url;
+  $("#go").disabled = true;
+  $("#notice").hidden = true;
+  $("#actions").hidden = true;
+  atCache.clear();
+  proxyTrouble = null;
+  const u = new URL(url);
+  $("#target").innerHTML = `Checking <strong>${esc(url)}</strong>…`;
+  CHECKS.forEach(c => renderRow(c, { status: "running", detail: [] }));
+  renderSummary();
+
+  // Memoised fetches, keyed on URL + Accept.
+  const cache = new Map();
+  const get = (target, opts = {}) => {
+    const k = target + "|" + (opts.accept || "");
+    if (!cache.has(k)) cache.set(k, fetchSmart(target, opts));
+    return cache.get(k);
+  };
+
+  const s = settings();
+  let pageRes, html = null;
+  if (s.pasted) { html = s.pasted; pageRes = { via: "paste", status: 200, finalUrl: url }; }
+  else {
+    pageRes = await get(url);
+    if (!pageRes.error && pageRes.status === 200) html = pageRes.text;
+  }
+  const doc = html ? new DOMParser().parseFromString(html, "text/html") : null;
+  const base = pageRes.finalUrl || url;
+  const abs = h => { try { return new URL(h, base).href; } catch { return h; } };
+
+  const c = {
+    url, origin: u.origin, host: u.hostname, isRoot: u.pathname === "/" || u.pathname === "",
+    doc, get, abs,
+    meta: k => doc?.querySelector(`meta[property="${k}" i], meta[name="${k}" i]`)?.getAttribute("content")?.trim() || "",
+    feeds: doc ? [...doc.querySelectorAll('link[rel~="alternate" i][type], a[rel~="alternate" i][type]')]
+      .filter(e => /rss|atom|feed\+json|application\/json/i.test(e.getAttribute("type")))
+      .map(e => ({ type: e.getAttribute("type").toLowerCase(), href: abs(e.getAttribute("href")), el: e.localName })) : [],
+    ld: doc ? jsonLdNodes(doc) : null,
+    pubWellKnown: get(u.origin + "/.well-known/site.standard.publication")
+  };
+  const wk = await c.pubWellKnown;
+  const wkUri = !wk.error && wk.status === 200 ? parseAtUri(wk.text)?.uri : null;
+  c.pubUri = () => wkUri || parseAtUri(doc?.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href") || "")?.uri || null;
+
+  if (!doc) {
+    showNotice(pageRes.error
+      ? `Couldn't read the page: ${pageRes.error}. Checks that need the HTML are skipped. Turn on the proxy, or paste the page source under Fetching options.`
+      : `The page returned HTTP ${pageRes.status}. Checks that need the HTML are skipped.`);
+  } else if (pageRes.via === "proxy") {
+    showNotice("The page blocks cross-origin reads, so its HTML was fetched through the CORS proxy. That's normal for most sites and doesn't affect the score.");
+  }
+
+  await Promise.all(CHECKS.map(async chk => {
+    let r;
+    if (chk.doc && !doc) r = R.skip("Page HTML unavailable.");
+    else {
+      try { r = await chk.run(c); }
+      catch (e) { r = R.fail(`Check failed: ${e.message}`); }
+    }
+    renderRow(chk, r);
+    renderSummary();
+  }));
+
+  if (proxyTrouble && doc) showNotice(proxyTrouble + " Some checks couldn't run. Set a working proxy under Fetching options.");
+  const via = pageRes.via === "paste" ? "pasted HTML" : pageRes.via === "proxy" ? "fetched through proxy" : "fetched directly";
+  $("#target").innerHTML = `<strong>${esc(url)}</strong> · ${via} · ${new Date().toLocaleTimeString()}`;
+  $("#actions").hidden = false;
+  $("#go").disabled = false;
+  try { history.replaceState(null, "", "?url=" + enc(url)); } catch {}
+}
+
+function showNotice(msg) { const n = $("#notice"); n.textContent = msg; n.hidden = false; }
+
+function markdownReport() {
+  const core = tally(CHECKS.filter(c => !SECTIONS.find(s => s.id === c.sec).optional));
+  const mark = { pass: "[x]", warn: "[~]", fail: "[ ]", skip: "[-]" };
+  const plain = s => String(s);
+  let out = `# Meta Checker report\n\n${lastUrl}\n\n**Score: ${core.pct ?? "–"}/100**\n`;
+  SECTIONS.forEach(s => {
+    const t = tally(CHECKS.filter(c => c.sec === s.id));
+    out += `\n## ${s.name}${s.optional ? " (optional)" : ""}: ${t.pct ?? "–"}%\n\n`;
+    CHECKS.filter(c => c.sec === s.id).forEach(c => {
+      const r = results[c.id] || {};
+      out += `- ${mark[r.status] || "[ ]"} **${c.name}** (${W[c.w].toLowerCase()})${r.detail?.length ? ": " + r.detail.map(plain).join("; ") : ""}\n`;
+      if (r.fix && r.status !== "pass") out += `  - Fix: ${plain(r.fix)}\n`;
+    });
+  });
+  return out;
+}
+
+async function copy(text, btn) {
+  const label = btn.textContent;
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+  catch { btn.textContent = "Copy failed"; }
+  setTimeout(() => btn.textContent = label, 1600);
+}
+
+// ---------- wiring ----------
+$("#useProxy").checked = store.get("useProxy", true);
+$("#proxy").value = store.get("proxy", $("#proxy").value);
+$("#useProxy").addEventListener("change", e => store.set("useProxy", e.target.checked));
+$("#proxy").addEventListener("change", e => store.set("proxy", e.target.value));
+$("#form").addEventListener("submit", e => { e.preventDefault(); const v = $("#url").value.trim(); if (v) run(v); });
+$("#copyMd").addEventListener("click", e => copy(markdownReport(), e.currentTarget));
+$("#copyLink").addEventListener("click", e => copy(location.href, e.currentTarget));
+
+renderSkeleton();
+renderSummary();
+const qp = new URLSearchParams(location.search).get("url");
+if (qp) run(qp);
+})();
+</script>
+</body>
+</html>
