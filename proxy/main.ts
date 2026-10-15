@@ -12,15 +12,16 @@
 
 import * as BunnySDK from "https://esm.sh/@bunny.net/edgescript-sdk@0.11.2";
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 // Origins allowed to call the proxy from a browser, or "*" for any. Entries can be separated by commas,
-// semicolons or whitespace, and are reduced to their origin, so quotes, trailing slashes and paths
-// (https://example.github.io/meta-checker/) are all fine.
+// semicolons or whitespace, and are reduced to their origin, so quotes, trailing slashes, paths
+// (https://example.github.io/meta-checker/) and bare hostnames (example.github.io) are all fine.
 function parseOrigins(raw: string): string[] {
   return raw.split(/[\s,;]+/).map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean).map((s) => {
     if (s === "*" || s === "null") return s;
     try {
-      return new URL(s).origin;
+      // A bare hostname such as example.github.io means its https origin.
+      return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`).origin;
     } catch {
       return s.replace(/\/+$/, "");
     }

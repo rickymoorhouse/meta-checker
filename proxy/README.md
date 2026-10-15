@@ -36,7 +36,7 @@ The proxy is narrow on purpose, so it can't be used as an open relay:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `ALLOWED_ORIGINS` | `*` | Origins allowed to call the proxy from a browser, such as `https://rickymoorhouse.github.io,https://rickymoorhouse.uk`. Separate entries with commas, semicolons or spaces. Each entry is reduced to its origin, so quotes, trailing slashes and paths are ignored. Requests from any other origin get a 403 that names the allowed origins, with CORS headers so the checker can show it. |
+| `ALLOWED_ORIGINS` | `*` | Origins allowed to call the proxy from a browser, such as `https://rickymoorhouse.github.io,https://rickymoorhouse.uk`. Separate entries with commas, semicolons or spaces. Each entry is reduced to its origin, so quotes, trailing slashes and paths are ignored, and a bare hostname means its `https://` origin. Requests from any other origin get a 403 that names the allowed origins, with CORS headers so the checker can show it. |
 | `MAX_BYTES` | `2000000` | Maximum body size returned |
 | `TIMEOUT_MS` | `10000` | Total time allowed for the fetch, including redirects |
 | `PORT` | unset | Local runs only; Bunny ignores it |
