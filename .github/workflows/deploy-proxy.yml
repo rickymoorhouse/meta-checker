@@ -1,0 +1,31 @@
+name: Deploy proxy to Bunny Edge Scripting
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "proxy/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type-check
+        run: deno check proxy/main.ts
+
+      - name: Publish the script to Bunny
+        uses: "BunnyWay/actions/deploy-script@main"
+        with:
+          script_id: ${{ vars.BUNNY_PROXY_SCRIPT_ID }}
+          file: "proxy/main.ts"

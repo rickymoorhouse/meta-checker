@@ -16,11 +16,14 @@ Based on [Machine-readable?](https://rickymoorhouse.uk/blog/2026/machine-readabi
 
 Open `index.html` in a browser, or host it anywhere static (for example GitHub Pages). To run a check on load, add `?url=https://example.com/post/` to the page address.
 
-## CORS
+## CORS and the proxy
 
-Everything runs client-side. Each request is tried directly first. If the browser blocks it, the request is retried through a configurable CORS proxy (a URL template containing `{url}`, set under *Fetching options*). Free public proxies are unreliable: corsproxy.io needs an API key, so a self-hosted proxy is the dependable option. If no proxy works, paste the page's HTML into *Fetching options* to run the HTML checks.
+Everything runs client-side. Each request is tried directly first. If the browser blocks it, the request is retried through a proxy, set under *Fetching options* or through `DEFAULT_PROXY` in `index.html`:
 
-Checks that can't be run are marked as skipped and left out of the score. SocialSpec files must allow CORS, so if one can only be read through the proxy it loses points.
+- **The Meta Checker proxy** (`proxy/`, for Bunny Edge Scripting). Enter its base URL. It returns the target's real status and headers, so CORS (`Access-Control-Allow-Origin`) and Content-Type are reported accurately, and the `Accept: text/markdown` negotiation check works. See [proxy/README.md](proxy/README.md).
+- **A generic CORS proxy.** Enter a URL template containing `{url}`. Free public proxies are unreliable, and their headers may not be the target's.
+
+If neither works, paste the page's HTML into *Fetching options* to run the HTML checks. Checks that can't be run are marked as skipped and left out of the score. SocialSpec files must allow CORS, so a file browsers can't read loses points.
 
 ## Scoring
 

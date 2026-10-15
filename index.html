@@ -179,15 +179,10 @@ footer p { margin: 0; }
       <summary>Fetching options</summary>
       <div class="settings-body">
         <p class="hint">Each URL is fetched directly first. Most sites block cross-origin reads of their HTML, so if a direct fetch fails the checker can retry through a CORS proxy. SocialSpec files must allow CORS, so a file that only loads through the proxy loses points.</p>
-        <p class="hint">Free public proxies come and go. corsproxy.io now needs a key (<code>https://corsproxy.io/?key=YOUR_KEY&amp;url={url}</code>). You can also point this at your own proxy, or paste the page source below.</p>
-        <label class="inline"><input id="useProxy" type="checkbox" checked> Retry blocked requests through a CORS proxy</label>
-        <label>Proxy URL template (<code>{url}</code> is replaced with the encoded target)
-          <input id="proxy" type="text" list="proxies" spellcheck="false" value="https://corsproxy.io/?url={url}">
-          <datalist id="proxies">
-            <option value="https://corsproxy.io/?url={url}"></option>
-            <option value="https://api.allorigins.win/raw?url={url}"></option>
-          </datalist>
+        <label>Proxy
+          <input id="proxy" type="text" spellcheck="false" placeholder="https://your-proxy.example">
         </label>
+        <p class="hint">Use the base URL of a Meta Checker proxy (see <code>proxy/</code> in the repo). It reports the target's real headers, so CORS and Content-Type are checked accurately. A generic CORS proxy also works: give a URL template containing <code>{url}</code>. Leave the field empty to fetch directly only.</p>
         <label>Page HTML (optional). Paste the page source to use instead of fetching it.
           <textarea id="pasted" spellcheck="false" placeholder="<!doctype html>…"></textarea>
         </label>
@@ -238,9 +233,11 @@ const store = {
 };
 
 // ---------- fetching ----------
+// Base URL of a deployed Meta Checker proxy (proxy/main.ts). Empty means direct fetches only.
+const DEFAULT_PROXY = "";
+
 const settings = () => ({
-  useProxy: $("#useProxy").checked,
-  proxy: $("#proxy").value.trim() || "https://corsproxy.io/?url={url}",
+  proxy: $("#proxy").value.trim(),
   pasted: $("#pasted").value.trim()
 });
 
@@ -257,26 +254,58 @@ async function rawFetch(url, accept) {
 let proxyTrouble = null;
 const proxied = (tpl, url) => tpl.includes("{url}") ? tpl.replace("{url}", enc(url)) : tpl + enc(url);
 
-// Direct first; on failure (usually CORS), via proxy. `cors` records whether the direct read worked.
+// Direct first; on failure (usually CORS), via the proxy. `cors` records whether a browser may read the response.
 async function fetchSmart(url, opts = {}) {
   const s = settings();
   try {
     const r = await rawFetch(url, opts.accept);
     return { ...r, via: "direct", cors: true };
   } catch (e) {
-    if (!s.useProxy) return { error: "blocked by CORS or unreachable (proxy is off)", cors: null, via: "none" };
-    try {
-      const r = await rawFetch(proxied(s.proxy, url), opts.accept);
-      // Auth, rate-limit and gateway errors come from the proxy itself, not the target site.
-      if ([401, 403, 407, 429].includes(r.status) || r.status >= 500) {
-        proxyTrouble = `The CORS proxy refused requests (HTTP ${r.status}). Public proxies often need an API key or rate-limit heavy use.`;
-        return { error: `blocked by CORS, and the proxy refused the request (HTTP ${r.status})`, cors: null, via: "none" };
-      }
-      return { ...r, finalUrl: url, via: "proxy", cors: false };
-    } catch (e2) {
-      proxyTrouble = "The CORS proxy couldn't be reached.";
-      return { error: "blocked by CORS or unreachable, and the proxy failed too", cors: null, via: "none" };
+    if (!s.proxy) return { error: "blocked by CORS or unreachable (no proxy set)", cors: null, via: "none" };
+    return s.proxy.includes("{url}") ? viaTemplate(s.proxy, url, opts) : viaMetaProxy(s.proxy, url, opts);
+  }
+}
+
+// Meta Checker proxy: returns a JSON report with the target's real status, headers and body.
+async function viaMetaProxy(base, url, opts) {
+  const endpoint = `${base.replace(/\/+$/, "")}/fetch?url=${enc(url)}${opts.accept ? `&accept=${enc(opts.accept)}` : ""}`;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  let res, data;
+  try {
+    res = await fetch(endpoint, { cache: "no-store", signal: ctl.signal });
+    data = await res.json();
+  } catch (e) {
+    proxyTrouble = `The proxy at ${base} couldn't be reached.`;
+    return { error: "blocked by CORS or unreachable, and the proxy couldn't be reached", cors: null, via: "none" };
+  } finally { clearTimeout(timer); }
+  // Errors here are about the target (invalid, private, timed out), not the proxy.
+  if (!res.ok) return { error: data.error || `proxy returned HTTP ${res.status}`, cors: null, via: "none" };
+  const h = data.headers || {};
+  const acao = h["access-control-allow-origin"];
+  return {
+    status: data.status, ok: data.status >= 200 && data.status < 300,
+    contentType: h["content-type"] || "", text: data.body ?? "", finalUrl: data.finalUrl || url,
+    headers: h, redirects: data.redirects || [],
+    via: "proxy", proxyKind: "meta",
+    cors: !!acao && (acao === "*" || acao === location.origin),
+    acao
+  };
+}
+
+// Generic CORS proxy given as a URL template. Response headers may be the proxy's own.
+async function viaTemplate(tpl, url, opts) {
+  try {
+    const r = await rawFetch(proxied(tpl, url), opts.accept);
+    // Auth, rate-limit and gateway errors come from the proxy itself, not the target site.
+    if ([401, 403, 407, 429].includes(r.status) || r.status >= 500) {
+      proxyTrouble = `The CORS proxy refused requests (HTTP ${r.status}). Public proxies often need an API key or rate-limit heavy use.`;
+      return { error: `blocked by CORS, and the proxy refused the request (HTTP ${r.status})`, cors: null, via: "none" };
     }
+    return { ...r, finalUrl: url, via: "proxy", proxyKind: "template", cors: false };
+  } catch (e2) {
+    proxyTrouble = "The CORS proxy couldn't be reached.";
+    return { error: "blocked by CORS or unreachable, and the proxy failed too", cors: null, via: "none" };
   }
 }
 
@@ -368,8 +397,10 @@ async function specFile(c, path, o) {
   const corsOk = r.cors === true;
   const detail = [
     p.msg,
-    `Content-Type \`${ct || "none"}\`${r.via === "proxy" ? " (as reported by the proxy)" : ""}${ctOk ? "" : `. Expected \`${o.ctWant}\``}.`,
-    corsOk ? "CORS allows cross-origin reads." : "CORS blocks cross-origin reads. Only the proxy could read it."
+    `Content-Type \`${ct || "none"}\`${r.proxyKind === "template" ? " (as reported by the proxy)" : ""}${ctOk ? "" : `. Expected \`${o.ctWant}\``}.`,
+    corsOk ? `CORS allows cross-origin reads${r.acao ? ` (\`Access-Control-Allow-Origin: ${r.acao}\`)` : ""}.`
+      : r.proxyKind === "meta" ? (r.acao ? `\`Access-Control-Allow-Origin: ${r.acao}\` doesn't allow other sites to read it.` : "No `Access-Control-Allow-Origin` header, so browsers on other sites can't read it.")
+      : "CORS blocks cross-origin reads. Only the proxy could read it."
   ];
   const frac = 0.5 + (ctOk ? 0.25 : 0) + (corsOk ? 0.25 : 0);
   const fixes = [!ctOk && `serve it as \`${o.ctWant}\``, !corsOk && "send `Access-Control-Allow-Origin: *`"].filter(Boolean);
@@ -662,7 +693,7 @@ const CHECKS = [
     if (!looksHtml(r.text) && (ct === "text/markdown" || moved || r.status === 200)) {
       return R.pass([`\`Accept: text/markdown\` returns \`${ct || "unknown"}\`${moved ? ` from \`${r.finalUrl}\`` : ""}.`]);
     }
-    if (r.via === "proxy") return R.warn("The proxy returned HTML. It may not forward the `Accept` header, so this result isn't conclusive.", "Allow CORS on the page, or check it directly with `curl -H 'Accept: text/markdown'`.");
+    if (r.proxyKind === "template") return R.warn("The proxy returned HTML. It may not forward the `Accept` header, so this result isn't conclusive.", "Allow CORS on the page, or check it directly with `curl -H 'Accept: text/markdown'`.");
     return R.fail(`\`Accept: text/markdown\` still returns \`${ct || "HTML"}\`.`, "Serve (or redirect to) the Markdown version when a client sends `Accept: text/markdown`.");
   } },
   { id: "llms", sec: "agents", w: 2, name: "llms.txt", async run(c) {
@@ -847,10 +878,8 @@ async function copy(text, btn) {
 }
 
 // ---------- wiring ----------
-$("#useProxy").checked = store.get("useProxy", true);
-$("#proxy").value = store.get("proxy", $("#proxy").value);
-$("#useProxy").addEventListener("change", e => store.set("useProxy", e.target.checked));
-$("#proxy").addEventListener("change", e => store.set("proxy", e.target.value));
+$("#proxy").value = store.get("proxyUrl", DEFAULT_PROXY);
+$("#proxy").addEventListener("change", e => store.set("proxyUrl", e.target.value.trim()));
 $("#form").addEventListener("submit", e => { e.preventDefault(); const v = $("#url").value.trim(); if (v) run(v); });
 $("#copyMd").addEventListener("click", e => copy(markdownReport(), e.currentTarget));
 $("#copyLink").addEventListener("click", e => copy(location.href, e.currentTarget));
