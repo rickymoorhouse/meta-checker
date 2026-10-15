@@ -68,6 +68,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 /* Form */
 form { display: grid; gap: 12px; }
 .urlrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.urlrow select {
+  flex: 0 1 auto; min-width: 0; font: 400 14px/1.2 var(--font-body); color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0 10px; min-height: 44px;
+}
 .urlrow input {
   flex: 1 1 320px; min-width: 0; font: 400 16px/1.2 var(--font-mono); color: var(--ink);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
@@ -167,14 +171,18 @@ footer p { margin: 0; }
   <header class="mast">
     <span class="eyebrow">Machine-readability audit</span>
     <h1>Meta Checker</h1>
-    <p>Enter a page URL to check its feeds, microformats, schema.org data, OpenGraph tags, standard.site records, SocialSpec files and agent-friendly formats. All checks run in your browser.</p>
+    <p>Enter a site or post URL to check its feeds, crawling setup, microformats, schema.org data, OpenGraph tags, IndieWeb and fediverse support, standard.site records, SocialSpec files and agent-friendly formats, and whether they all agree. Whole-site mode checks the home page and a post together.</p>
   </header>
 
   <form id="form" novalidate>
     <div class="urlrow">
       <input id="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" aria-label="Page URL"
              placeholder="https://example.com/blog/my-post/" value="https://rickymoorhouse.uk/blog/2026/machine-readability/">
-      <button id="go" type="submit">Check page</button>
+      <select id="scope" aria-label="What to check">
+        <option value="site">Whole site</option>
+        <option value="page">This page only</option>
+      </select>
+      <button id="go" type="submit">Check</button>
     </div>
     <details class="settings">
       <summary>Fetching options</summary>
@@ -212,8 +220,8 @@ footer p { margin: 0; }
   <main id="checklist" class="wrap" style="padding:0"></main>
 
   <footer>
-    <p>Covers the formats in <a href="https://rickymoorhouse.uk/blog/2026/machine-readability/">Machine-readable?</a> and the <a href="https://socialspec.org">SocialSpec</a> APIs. Weights: required ×3, recommended ×2, nice to have ×1. A warning earns half credit. Agent accessibility is scored separately and doesn't affect the main score.</p>
-    <p>Add <code>?url=https://…</code> to this page's address to run a check on load.</p>
+    <p>Covers the formats in <a href="https://rickymoorhouse.uk/blog/2026/machine-readability/">Machine-readable?</a> and the <a href="https://socialspec.org">SocialSpec</a> APIs. Weights: required ×3, recommended ×2, nice to have ×1. A warning earns partial credit. Checks that can't run, or don't apply, are left out of the score. Agent accessibility is scored separately and doesn't affect the main score.</p>
+    <p>Add <code>?url=https://…</code> to this page's address to run a check on load, and <code>&amp;scope=page</code> to check only that page. Each check is labelled with what it applies to: each page, the post, the home page, or the whole site.</p>
   </footer>
 </div>
 
@@ -226,13 +234,26 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // Escape, then turn `backticks` into <code>.
 const fmt = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
-const trunc = (s, n = 90) => (s = String(s).replace(/\s+/g, " ").trim()).length > n ? s.slice(0, n - 1) + "…" : s;
+const trunc = (s, n = 90) => (s = String(s ?? "").replace(/\s+/g, " ").trim()).length > n ? s.slice(0, n - 1) + "…" : s;
 const looksHtml = t => /^\s*(<!doctype html|<html[\s>])/i.test(t || "");
 const enc = encodeURIComponent;
+const uniq = a => [...new Set(a)];
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const code = s => "`" + s + "`";
+const memo = fn => { let p; return () => (p ??= fn()); };
 const store = {
   get(k, d) { try { const v = localStorage.getItem("metachecker:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("metachecker:" + k, JSON.stringify(v)); } catch {} }
 };
+const ctOf = r => (r?.contentType || "").split(";")[0].trim().toLowerCase();
+const sameHost = (a, b) => a.replace(/^www\./, "") === b.replace(/^www\./, "");
+// Normalised form for comparing URLs across formats: keeps the scheme, drops www, index files, trailing slash, query and hash.
+function normUrl(u, base) {
+  try {
+    const x = new URL(u, base);
+    return `${x.protocol}//${x.hostname.replace(/^www\./, "")}${x.pathname.replace(/\/index\.(html?|md)$/, "/").replace(/\/+$/, "")}`.toLowerCase();
+  } catch { return String(u).toLowerCase(); }
+}
 
 // ---------- fetching ----------
 // Base URL of a deployed Meta Checker proxy (proxy/main.ts). Empty means direct fetches only.
@@ -240,8 +261,10 @@ const DEFAULT_PROXY = "https://meta-checker-proxy-y667o.bunny.run";
 
 const settings = () => ({
   proxy: $("#proxy").value.trim(),
-  pasted: $("#pasted").value.trim()
+  pasted: $("#pasted").value.trim(),
+  scope: $("#scope").value
 });
+const hasMetaProxy = () => { const p = settings().proxy; return !!p && !p.includes("{url}"); };
 
 async function rawFetch(url, accept) {
   const ctl = new AbortController();
@@ -249,7 +272,9 @@ async function rawFetch(url, accept) {
   try {
     const r = await fetch(url, { headers: accept ? { Accept: accept } : {}, signal: ctl.signal, cache: "no-store", redirect: "follow" });
     const text = await r.text();
-    return { status: r.status, ok: r.ok, contentType: r.headers.get("content-type") || "", text, finalUrl: r.url || url };
+    // Only CORS-safelisted or exposed headers are visible on a direct fetch.
+    const headers = {}; r.headers.forEach((v, k) => { headers[k] = v; });
+    return { status: r.status, ok: r.ok, contentType: r.headers.get("content-type") || "", text, finalUrl: r.url || url, headers };
   } finally { clearTimeout(timer); }
 }
 
@@ -257,8 +282,10 @@ let proxyTrouble = null;
 const proxied = (tpl, url) => tpl.includes("{url}") ? tpl.replace("{url}", enc(url)) : tpl + enc(url);
 
 // Direct first; on failure (usually CORS), via the proxy. `cors` records whether a browser may read the response.
+// `preferProxy` goes straight to the Meta Checker proxy when one is set, for checks that need every response header.
 async function fetchSmart(url, opts = {}) {
   const s = settings();
+  if (opts.preferProxy && hasMetaProxy()) return viaMetaProxy(s.proxy, url, opts);
   try {
     const r = await rawFetch(url, opts.accept);
     return { ...r, via: "direct", cors: true };
@@ -316,35 +343,168 @@ function parseXml(text) {
   const d = new DOMParser().parseFromString(text, "application/xml");
   return d.getElementsByTagName("parsererror").length ? null : d;
 }
-function parseXmlFeed(text) {
+const ATOM = "http://www.w3.org/2005/Atom";
+const childText = (el, ...names) => {
+  for (const n of names) {
+    const [ns, local] = n.includes(":") ? n.split(":") : [null, n];
+    const hit = [...el.children].find(c => c.localName === local && (!ns || c.prefix === ns || (ns === "atom" && c.namespaceURI === ATOM)));
+    if (hit && hit.textContent.trim()) return hit.textContent.trim();
+  }
+  return "";
+};
+
+// Parses RSS 2.0, RSS 1.0, Atom or JSON Feed into one shape.
+function parseFeed(text) {
   if (!text || looksHtml(text)) return null;
+  if (/^\s*[{[]/.test(text)) {
+    let j; try { j = JSON.parse(text); } catch { return null; }
+    if (!j || !/^https:\/\/jsonfeed\.org\/version\//.test(j.version || "")) return null;
+    const feedAuthor = j.authors?.[0]?.name || j.author?.name;
+    return {
+      kind: "json", format: `JSON Feed ${j.version.split("/").pop()}`, title: j.title, self: j.feed_url, hub: j.hubs?.[0]?.url,
+      valid: !!j.title && Array.isArray(j.items),
+      items: (j.items || []).map(i => ({
+        title: i.title, link: i.url, date: i.date_published || i.date_modified,
+        author: i.authors?.[0]?.name || i.author?.name || feedAuthor,
+        content: i.content_html || i.content_text || "", summary: i.summary || "", full: !!(i.content_html || i.content_text)
+      }))
+    };
+  }
   const d = parseXml(text); if (!d) return null;
-  const root = d.documentElement, n = root.localName;
-  if (n === "rss") return { kind: "RSS " + (root.getAttribute("version") || ""), items: d.getElementsByTagName("item").length, title: d.querySelector("channel > title")?.textContent };
-  if (n === "feed") return { kind: "Atom", items: d.getElementsByTagNameNS("*", "entry").length, title: d.getElementsByTagNameNS("*", "title")[0]?.textContent };
-  if (n === "RDF") return { kind: "RSS 1.0", items: d.getElementsByTagNameNS("*", "item").length, title: d.getElementsByTagNameNS("*", "title")[0]?.textContent };
+  const root = d.documentElement;
+  const atomLinks = [...d.getElementsByTagNameNS(ATOM, "link")].filter(l => l.parentElement === (root.localName === "feed" ? root : root.querySelector("channel")));
+  const self = atomLinks.find(l => l.getAttribute("rel") === "self")?.getAttribute("href");
+  const hub = atomLinks.find(l => l.getAttribute("rel") === "hub")?.getAttribute("href");
+  if (root.localName === "rss" || root.localName === "RDF") {
+    const channel = root.querySelector("channel") || root;
+    const items = [...d.getElementsByTagNameNS("*", "item")];
+    return {
+      kind: "xml", format: root.localName === "rss" ? `RSS ${root.getAttribute("version") || ""}`.trim() : "RSS 1.0",
+      title: childText(channel, "title"), self, hub, valid: true,
+      items: items.map(i => {
+        const full = [...i.children].find(c => c.localName === "encoded")?.textContent || "";
+        return { title: childText(i, "title"), link: childText(i, "link"), date: childText(i, "pubDate", "dc:date", "date"), author: childText(i, "dc:creator", "creator", "author"), content: full || childText(i, "description"), summary: childText(i, "description"), full: !!full };
+      })
+    };
+  }
+  if (root.localName === "feed") {
+    const entries = [...root.children].filter(c => c.localName === "entry");
+    const feedAuthor = [...root.children].find(c => c.localName === "author")?.querySelector("name")?.textContent;
+    return {
+      kind: "xml", format: "Atom", title: childText(root, "title"), self, hub, valid: true,
+      items: entries.map(e => {
+        const link = [...e.children].find(c => c.localName === "link" && (!c.getAttribute("rel") || c.getAttribute("rel") === "alternate"))?.getAttribute("href");
+        const content = childText(e, "content");
+        return { title: childText(e, "title"), link, date: childText(e, "published", "updated"), author: [...e.children].find(c => c.localName === "author")?.querySelector("name")?.textContent || feedAuthor, content: content || childText(e, "summary"), summary: childText(e, "summary"), full: !!content };
+      })
+    };
+  }
   return null;
 }
-function parseJsonFeed(text) {
-  let j; try { j = JSON.parse(text); } catch { return null; }
-  if (!j || typeof j !== "object") return null;
-  return { version: j.version, title: j.title, items: Array.isArray(j.items) ? j.items.length : null, valid: /^https:\/\/jsonfeed\.org\/version\/1(\.1)?$/.test(j.version || "") && !!j.title && Array.isArray(j.items) };
-}
+const FEED_TYPES = /rss|atom|feed\+json|application\/json/i;
+const feedKindOfType = t => /json/i.test(t) ? "json" : "xml";
+
 function parseAtUri(s) {
   const m = /^at:\/\/([^/\s]+)\/([^/\s]+)\/([^/?#\s]+)/.exec((s || "").trim());
   return m ? { repo: m[1], collection: m[2], rkey: m[3], uri: m[0] } : null;
 }
+
+// HTTP Link header (RFC 8288) → [{ href, rel: [...], type }]
+function parseLinkHeader(h) {
+  const out = [];
+  for (const m of (h || "").matchAll(/<([^>]*)>((?:\s*;\s*[^;,]+)*)/g)) {
+    const params = {};
+    for (const p of m[2].matchAll(/;\s*([\w*-]+)\s*=\s*(?:"([^"]*)"|([^;,\s]+))/g)) params[p[1].toLowerCase()] = p[2] ?? p[3];
+    out.push({ href: m[1], rel: (params.rel || "").toLowerCase().split(/\s+/).filter(Boolean), type: (params.type || "").toLowerCase() });
+  }
+  return out;
+}
+
+// Front matter in YAML (---) or TOML (+++) → flat object of top-level scalar values.
+function frontMatter(md) {
+  const m = /^(---|\+\+\+)\r?\n([\s\S]*?)\r?\n\1/.exec(md || "");
+  if (!m) return null;
+  const out = {};
+  for (const line of m[2].split(/\r?\n/)) {
+    const kv = m[1] === "---" ? /^([\w-]+):\s*(.*)$/.exec(line) : /^([\w-]+)\s*=\s*(.*)$/.exec(line);
+    if (kv && kv[2] !== "") out[kv[1].toLowerCase()] = kv[2].trim().replace(/^["']|["']$/g, "");
+  }
+  return out;
+}
+
+// ---------- schema.org extraction: JSON-LD, Microdata and RDFa ----------
 function jsonLdNodes(doc) {
   const out = [], errors = [];
-  doc.querySelectorAll('script[type="application/ld+json"]').forEach((s, i) => {
+  const blocks = doc.querySelectorAll('script[type="application/ld+json"]');
+  blocks.forEach((s, i) => {
     try {
       const walk = n => { if (Array.isArray(n)) n.forEach(walk); else if (n && typeof n === "object") { if (n["@type"]) out.push(n); if (n["@graph"]) walk(n["@graph"]); } };
       walk(JSON.parse(s.textContent));
     } catch (e) { errors.push(`Block ${i + 1}: ${e.message}`); }
   });
-  return { nodes: out, errors, count: doc.querySelectorAll('script[type="application/ld+json"]').length };
+  return { nodes: out, errors, count: blocks.length };
 }
+// Microdata (itemscope/itemprop/itemtype) and RDFa (typeof/property) share a shape, so one extractor handles both.
+function embeddedNodes(doc, scopeSel, propAttr, typeOf) {
+  const toNode = el => {
+    const node = { "@type": typeOf(el) };
+    const props = [...el.querySelectorAll(`[${propAttr}]`)].filter(p => p.parentElement?.closest(scopeSel) === el);
+    for (const p of props) {
+      const value = p.matches(scopeSel) ? toNode(p)
+        : p.getAttribute("content") ?? p.getAttribute("datetime") ?? (p.matches("a, link, area") ? p.getAttribute("href") : p.matches("img, audio, video, source") ? p.getAttribute("src") : p.textContent.trim());
+      for (const name of p.getAttribute(propAttr).split(/\s+/).map(n => n.replace(/^schema:/, ""))) if (!(name in node)) node[name] = value;
+    }
+    return node;
+  };
+  return [...doc.querySelectorAll(scopeSel)]
+    .filter(el => !el.hasAttribute(propAttr) || !el.parentElement?.closest(scopeSel))
+    .map(toNode)
+    .filter(n => n["@type"].length);
+}
+const microdataNodes = doc => embeddedNodes(doc, "[itemscope]", "itemprop",
+  el => (el.getAttribute("itemtype") || "").split(/\s+/).filter(t => /schema\.org/i.test(t)).map(t => t.replace(/^https?:\/\/schema\.org\//i, "")));
+const rdfaNodes = doc => embeddedNodes(doc, "[typeof]", "property",
+  el => (el.getAttribute("typeof") || "").split(/\s+/).filter(Boolean).map(t => t.replace(/^schema:/, "")));
 const types = n => [].concat(n["@type"] || []).map(String);
+const nameOf = v => [].concat(v || []).map(a => typeof a === "string" ? a : a?.name).filter(Boolean);
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+// ---------- robots.txt ----------
+function parseRobots(t) {
+  const groups = [], sitemaps = [], signals = [];
+  let cur = null, lastAgent = false;
+  for (const raw of t.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, "").trim();
+    const m = /^([\w-]+)\s*:\s*(.*)$/.exec(line);
+    if (!m) continue;
+    const key = m[1].toLowerCase(), val = m[2].trim();
+    if (key === "user-agent") {
+      if (!cur || !lastAgent) groups.push(cur = { agents: [], rules: [] });
+      cur.agents.push(val.toLowerCase());
+      lastAgent = true;
+      continue;
+    }
+    lastAgent = false;
+    if ((key === "allow" || key === "disallow") && cur) cur.rules.push({ allow: key === "allow", path: val });
+    else if (key === "sitemap") sitemaps.push(val);
+    else if (key === "content-signal") signals.push(val);
+  }
+  return { groups, sitemaps, signals };
+}
+// Google-style matching: the most specific user-agent group, then the longest matching rule (allow wins ties).
+function robotsAllows(rb, agent, path) {
+  const a = agent.toLowerCase();
+  const named = rb.groups.filter(g => g.agents.some(x => x !== "*" && a.includes(x)));
+  const group = named.length ? named : rb.groups.filter(g => g.agents.includes("*"));
+  const rules = group.flatMap(g => g.rules).filter(r => r.path);
+  let best = null;
+  for (const r of rules) {
+    const re = new RegExp("^" + r.path.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\\\$$/, "$"));
+    if (re.test(path) && (!best || r.path.length > best.path.length || (r.path.length === best.path.length && r.allow))) best = r;
+  }
+  return !best || best.allow;
+}
+const AI_AGENTS = ["GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User", "Google-Extended", "PerplexityBot", "CCBot", "Applebot-Extended", "Meta-ExternalAgent", "Bytespider"];
 
 // ---------- AT Protocol resolution (for standard.site) ----------
 const atCache = new Map();
@@ -381,198 +541,395 @@ const R = {
   fail: (detail, fix, extra = {}) => ({ status: "fail", detail: [].concat(detail || []), fix, ...extra }),
   skip: (detail, extra = {}) => ({ status: "skip", detail: [].concat(detail || []), ...extra })
 };
-const unreachable = list => list.length > 0 && list.every(r => r.error);
 const viaNote = r => r.via === "proxy" ? " (through proxy)" : "";
+const NEEDS_PROXY = "Needs the Meta Checker proxy to read response headers. Set it under Fetching options.";
 
-// Shared check for SocialSpec well-known files: exists + parses, correct Content-Type, CORS.
+// Shared check for SocialSpec well-known files: exists + parses, Content-Type, CORS.
+// `o.ct` scores the Content-Type: 1 for the expected type, 0.5 for an accepted alternative, 0 otherwise.
 async function specFile(c, path, o) {
   const url = c.origin + path;
   const r = await c.get(url);
   const fix = o.fix;
-  if (r.error) return R.fail(`Couldn't read \`${path}\` cross-origin: it's missing or doesn't allow CORS (${r.error}).`, fix);
-  if (r.status !== 200) return R.fail(`\`${path}\` returned HTTP ${r.status}${viaNote(r)}.`, fix);
-  if (looksHtml(r.text)) return R.fail(`\`${path}\` returns an HTML page, probably a catch-all 404.`, fix);
+  if (r.error) return R.fail(`Couldn't read ${code(path)} cross-origin: it's missing or doesn't allow CORS (${r.error}).`, fix);
+  if (r.status !== 200) return R.fail(`${code(path)} returned HTTP ${r.status}${viaNote(r)}.`, fix);
+  if (looksHtml(r.text)) return R.fail(`${code(path)} returns an HTML page, probably a catch-all 404.`, fix);
   const p = o.parse(r.text);
   if (!p.ok) return R.fail(p.msg, fix);
-  const ct = (r.contentType || "").split(";")[0].trim().toLowerCase();
-  const ctOk = o.ctOk(ct);
+  const ct = ctOf(r);
+  const ctScore = o.ct(ct);
   const corsOk = r.cors === true;
   const detail = [
     p.msg,
-    `Content-Type \`${ct || "none"}\`${r.proxyKind === "template" ? " (as reported by the proxy)" : ""}${ctOk ? "" : `. Expected \`${o.ctWant}\``}.`,
-    corsOk ? `CORS allows cross-origin reads${r.acao ? ` (\`Access-Control-Allow-Origin: ${r.acao}\`)` : ""}.`
-      : r.proxyKind === "meta" ? (r.acao ? `\`Access-Control-Allow-Origin: ${r.acao}\` doesn't allow other sites to read it.` : "No `Access-Control-Allow-Origin` header, so browsers on other sites can't read it.")
+    `Content-Type ${code(ct || "none")}${r.proxyKind === "template" ? " (as reported by the proxy)" : ""}${ctScore === 1 ? "" : ctScore ? `, an accepted alternative. ${code(o.ctWant)} is preferred` : `. Expected ${code(o.ctWant)}`}.`,
+    corsOk ? `CORS allows cross-origin reads${r.acao ? ` (${code("Access-Control-Allow-Origin: " + r.acao)})` : ""}.`
+      : r.proxyKind === "meta" ? (r.acao ? `${code("Access-Control-Allow-Origin: " + r.acao)} doesn't allow other sites to read it.` : "No `Access-Control-Allow-Origin` header, so browsers on other sites can't read it.")
       : "CORS blocks cross-origin reads. Only the proxy could read it."
   ];
-  const frac = 0.5 + (ctOk ? 0.25 : 0) + (corsOk ? 0.25 : 0);
-  const fixes = [!ctOk && `serve it as \`${o.ctWant}\``, !corsOk && "send `Access-Control-Allow-Origin: *`"].filter(Boolean);
-  return ctOk && corsOk ? R.pass(detail, { frac }) : R.warn(detail, fixes.join(" and ").replace(/^./, m => m.toUpperCase()) + ".", { frac });
+  const frac = 0.5 + 0.25 * ctScore + (corsOk ? 0.25 : 0);
+  const fixes = [ctScore < 1 && `serve it as ${code(o.ctWant)}`, !corsOk && "send `Access-Control-Allow-Origin: *`"].filter(Boolean);
+  return ctScore === 1 && corsOk ? R.pass(detail, { frac }) : R.warn(detail, fixes.join(" and ").replace(/^./, m => m.toUpperCase()) + ".", { frac });
+}
+
+// ---------- pages ----------
+// A page under test: its fetch result, parsed document and helpers. Site mode checks the home page and one post.
+function makePage(kind, url, res, html, label) {
+  const doc = html ? new DOMParser().parseFromString(html, "text/html") : null;
+  const base = res.finalUrl || url;
+  const abs = h => { try { return new URL(h, base).href; } catch { return h; } };
+  const linkHeader = parseLinkHeader(res.headers?.link);
+  const P = {
+    kind, url, res, doc, abs, label,
+    meta: k => doc?.querySelector(`meta[property="${k}" i], meta[name="${k}" i]`)?.getAttribute("content")?.trim() || "",
+    // rel links from <link>, <a> and the HTTP Link header.
+    rels: (rel, typeRe) => [
+      ...(doc ? [...doc.querySelectorAll("link[rel], a[rel]")]
+        .filter(e => e.getAttribute("rel").toLowerCase().split(/\s+/).includes(rel))
+        .map(e => ({ href: abs(e.getAttribute("href") || ""), type: (e.getAttribute("type") || "").toLowerCase(), source: e.localName === "link" ? "head" : "body" })) : []),
+      ...linkHeader.filter(l => l.rel.includes(rel)).map(l => ({ href: abs(l.href), type: l.type, source: "header" }))
+    ].filter(x => x.href && (!typeRe || typeRe.test(x.type))),
+    ld: doc ? jsonLdNodes(doc) : { nodes: [], errors: [], count: 0 },
+    micro: doc ? microdataNodes(doc) : [],
+    rdfa: doc ? rdfaNodes(doc) : []
+  };
+  P.schema = [...P.ld.nodes, ...P.micro, ...P.rdfa];
+  P.article = P.schema.find(n => types(n).some(t => /(Article|BlogPosting|Report|SocialMediaPosting)$/.test(t)));
+  P.hentry = doc?.querySelector(".h-entry");
+  return P;
+}
+
+async function loadPage(c, kind, url, pasted, label) {
+  let res, html = null;
+  if (pasted) { html = pasted; res = { via: "paste", status: 200, finalUrl: url, headers: {} }; }
+  else {
+    res = await c.get(url);
+    if (!res.error && res.status === 200 && !/json|xml|markdown|text\/plain/.test(ctOf(res))) html = res.text;
+  }
+  return makePage(kind, url, res, html, label);
 }
 
 // ---------- sections & checks ----------
 const SECTIONS = [
   { id: "basics", name: "Page basics", blurb: "The core metadata every other format builds on." },
-  { id: "feeds", name: "Feeds", blurb: "RSS, Atom and JSON Feed, so readers can subscribe." },
-  { id: "structured", name: "Structured data", blurb: "Microformats (h-entry) and schema.org JSON-LD describing the content." },
+  { id: "crawl", name: "Crawling", blurb: "HTTPS, robots.txt and sitemaps, which tell crawlers what exists and what they may fetch." },
+  { id: "feeds", name: "Feeds", blurb: "RSS, Atom or JSON Feed, so readers can subscribe." },
+  { id: "structured", name: "Structured data", blurb: "Microformats and schema.org data describing the content." },
   { id: "social", name: "Social previews", blurb: "OpenGraph and Twitter card tags used for link previews." },
+  { id: "socialweb", name: "Social web", blurb: "IndieWeb and fediverse conventions for identity and replies." },
   { id: "standard", name: "standard.site", blurb: "Publication and document records on AT Protocol, linked from the site." },
   { id: "socialspec", name: "SocialSpec", blurb: "Single-file, single-request social APIs at well-known paths." },
+  { id: "consistency", name: "Consistency", blurb: "Whether every format describes the post the same way. Disagreements confuse the consumers that read them." },
   { id: "agents", name: "Agent accessibility", optional: true, blurb: "Markdown versions, content negotiation and discovery files for AI agents. Scored separately." }
 ];
-
 const W = { 3: "Required", 2: "Recommended", 1: "Nice to have" };
+const SCOPE = { each: "Each page", post: "Post", home: "Home page", site: "Site" };
 
 const CHECKS = [
   // --- Page basics
-  { id: "title", sec: "basics", w: 2, name: "Page title", doc: true, run(c) {
-    const t = c.doc.querySelector("title")?.textContent.trim();
+  { id: "title", sec: "basics", w: 2, scope: "each", name: "Page title", run(c, P) {
+    const t = P.doc.querySelector("title")?.textContent.trim();
     return t ? R.pass(`“${trunc(t)}”`) : R.fail("No `<title>` element.", "Add a descriptive `<title>` to `<head>`.");
   } },
-  { id: "lang", sec: "basics", w: 2, name: "Document language", doc: true, run(c) {
-    const l = c.doc.documentElement.getAttribute("lang");
-    return l ? R.pass(`\`lang="${l}"\``) : R.fail("No `lang` attribute on `<html>`.", "Add `lang`, for example `<html lang=\"en\">`.");
+  { id: "lang", sec: "basics", w: 2, scope: "each", name: "Document language", run(c, P) {
+    const l = P.doc.documentElement.getAttribute("lang");
+    return l ? R.pass(code(`lang="${l}"`)) : R.fail("No `lang` attribute on `<html>`.", "Add `lang`, for example `<html lang=\"en\">`.");
   } },
-  { id: "description", sec: "basics", w: 2, name: "Meta description", doc: true, run(c) {
-    const d = c.meta("description");
+  { id: "description", sec: "basics", w: 2, scope: "each", name: "Meta description", run(c, P) {
+    const d = P.meta("description");
     if (!d) return R.fail("No `<meta name=\"description\">`.", "Add a one- or two-sentence summary as `<meta name=\"description\">`.");
     return d.length > 300 ? R.warn(`${d.length} characters, longer than most consumers display.`, "Keep it under about 160–300 characters.") : R.pass(`“${trunc(d)}” (${d.length} characters)`);
   } },
-  { id: "canonical", sec: "basics", w: 3, name: "Canonical URL", doc: true, run(c) {
-    const h = c.doc.querySelector('link[rel~="canonical" i]')?.getAttribute("href");
-    if (!h) return R.fail("No `<link rel=\"canonical\">`.", "Add `<link rel=\"canonical\" href=\"…\">` with the page's absolute URL.");
-    const a = c.abs(h);
-    const d = [`\`${a}\``];
-    if (!/^https?:\/\//i.test(h)) return R.warn(d.concat("The href is relative."), "Use an absolute URL.");
-    if (a.replace(/\/$/, "") !== c.url.replace(/\/$/, "")) d.push("This differs from the URL you checked.");
+  { id: "canonical", sec: "basics", w: 3, scope: "each", name: "Canonical URL", run(c, P) {
+    const l = P.rels("canonical")[0];
+    if (!l) return R.fail("No `<link rel=\"canonical\">` or canonical `Link` header.", "Add `<link rel=\"canonical\" href=\"…\">` with the page's absolute URL.");
+    const raw = l.source === "header" ? l.href : P.doc.querySelector('link[rel~="canonical" i]').getAttribute("href");
+    const d = [`${code(l.href)}${l.source === "header" ? " (from the `Link` header)" : ""}`];
+    if (!/^https?:\/\//i.test(raw)) return R.warn(d.concat("The href is relative."), "Use an absolute URL.");
+    if (normUrl(l.href) !== normUrl(P.url)) d.push("This differs from the URL that was checked.");
     return R.pass(d);
   } },
-  { id: "relme", sec: "basics", w: 1, name: "rel=me identity links", doc: true, run(c) {
-    const els = [...c.doc.querySelectorAll('link[rel~="me" i], a[rel~="me" i]')];
-    const hosts = [...new Set(els.map(e => { try { return new URL(c.abs(e.getAttribute("href"))).hostname; } catch { return null; } }).filter(Boolean))];
-    return els.length ? R.pass(`${els.length} link${els.length > 1 ? "s" : ""}: ${hosts.slice(0, 8).join(", ")}`) :
+  { id: "relme", sec: "basics", w: 1, scope: "site", name: "rel=me identity links", run(c) {
+    const links = uniq(c.pages.flatMap(P => P.rels("me").map(l => l.href)));
+    if (!c.pages.some(P => P.doc) && !links.length) return R.skip("Page HTML unavailable.");
+    const hosts = uniq(links.map(h => { try { return new URL(h).hostname; } catch { return null; } }).filter(Boolean));
+    return links.length ? R.pass(`${plural(links.length, "link")}: ${hosts.slice(0, 8).join(", ")}`) :
       R.fail("No `rel=\"me\"` links.", "Link your profiles with `rel=\"me\"` so other sites can verify you own them.", { links: [["IndieWeb rel=me", "https://indieweb.org/rel-me"]] });
+  } },
+  { id: "imgAlt", sec: "basics", w: 1, scope: "post", name: "Image alt text", run(c, P) {
+    const area = P.doc.querySelector(".e-content, article, main") || P.doc.body;
+    const imgs = [...area.querySelectorAll("img")];
+    if (!imgs.length) return R.skip("No images in the post.");
+    const missing = imgs.filter(i => !i.hasAttribute("alt"));
+    if (!missing.length) return R.pass(`All ${plural(imgs.length, "image")} have an \`alt\` attribute.`);
+    return R.warn([`${missing.length} of ${plural(imgs.length, "image")} have no \`alt\` attribute`, ...missing.slice(0, 3).map(i => code(trunc(i.getAttribute("src") || "", 70)))],
+      "Describe each image with `alt` text, or use `alt=\"\"` for decorative images.", { frac: 1 - missing.length / imgs.length });
+  } },
+
+  // --- Crawling
+  { id: "https", sec: "crawl", w: 1, scope: "site", name: "HTTPS redirect", async run(c) {
+    if (!hasMetaProxy()) return R.skip(NEEDS_PROXY);
+    const r = await c.get(`http://${c.host}/`, { preferProxy: true });
+    if (r.error) return R.skip(`Couldn't request ${code(`http://${c.host}/`)}: ${r.error}.`);
+    const hsts = c.home?.res.headers?.["strict-transport-security"];
+    const first = r.redirects?.[0];
+    const d = [first ? `${code(`http://${c.host}/`)} returns HTTP ${first.status} to ${code(r.finalUrl)}.` : `${code(`http://${c.host}/`)} returns HTTP ${r.status} without redirecting.`];
+    if (hsts) d.push(`Sends ${code("Strict-Transport-Security: " + hsts)}.`);
+    if (!r.finalUrl?.startsWith("https://")) return R.fail(d, "Redirect every `http://` request to its `https://` equivalent.");
+    if (first && ![301, 308].includes(first.status)) return R.warn(d, "Use a permanent redirect (301 or 308) so crawlers update their links.");
+    return R.pass(d);
+  } },
+  { id: "robots", sec: "crawl", w: 2, scope: "site", name: "robots.txt", async run(c) {
+    const links = [["robots.txt spec", "https://www.rfc-editor.org/rfc/rfc9309"]];
+    const r = await c.robots();
+    if (r.error) return R.skip(`Couldn't check ${code("/robots.txt")}: ${r.error}.`, { links });
+    if (r.status !== 200 || looksHtml(r.text)) return R.fail(`${code("/robots.txt")} returned ${r.status !== 200 ? "HTTP " + r.status : "an HTML page"}.`, "Publish `/robots.txt` with a `Sitemap:` line, even if it allows everything.", { links });
+    const rb = parseRobots(r.text);
+    const d = [`${plural(rb.groups.length, "user-agent group")}, ${plural(rb.sitemaps.length, "sitemap")} listed.`];
+    const issues = [];
+    if (!rb.sitemaps.length) issues.push("Add a `Sitemap:` line pointing to your sitemap.");
+    // Machine-readable resources this check found should be fetchable by general crawlers.
+    const feeds = (await c.feedsData()).found.map(f => f.url);
+    const md = c.post ? c.post.rels("alternate", /markdown/).map(l => l.href) : [];
+    const paths = uniq([...feeds, ...md, c.origin + "/llms.txt", c.post?.url].filter(Boolean)).map(u => { try { const x = new URL(u); return sameHost(x.hostname, c.host) ? x.pathname : null; } catch { return null; } }).filter(Boolean);
+    const blocked = paths.filter(p => !robotsAllows(rb, "*", p));
+    if (blocked.length) { d.push(`Blocked for all crawlers: ${blocked.map(code).join(", ")}.`); issues.push("Allow crawlers to fetch your feeds, Markdown files and `llms.txt`."); }
+    const ai = AI_AGENTS.map(a => [a, robotsAllows(rb, a, "/")]);
+    const aiBlocked = ai.filter(([, ok]) => !ok).map(([a]) => a);
+    d.push(aiBlocked.length ? `AI crawlers blocked from the site: ${aiBlocked.join(", ")}. Allowed: ${ai.filter(([, ok]) => ok).map(([a]) => a).join(", ") || "none"}.` : "All common AI crawlers are allowed (GPTBot, ClaudeBot, Google-Extended, PerplexityBot and others).");
+    if (rb.signals.length) d.push(`Content signals: ${rb.signals.map(code).join(", ")}.`);
+    return issues.length ? R.warn(d, issues.join(" "), { links, frac: 1 - 0.25 * issues.length }) : R.pass(d, { links });
+  } },
+  { id: "sitemap", sec: "crawl", w: 2, scope: "site", name: "Sitemap", async run(c) {
+    const links = [["sitemaps.org", "https://www.sitemaps.org/protocol.html"]];
+    const rr = await c.robots();
+    const listed = rr.status === 200 && !looksHtml(rr.text) ? parseRobots(rr.text).sitemaps : [];
+    const cands = uniq([...listed, c.origin + "/sitemap.xml", c.origin + "/sitemap_index.xml"]);
+    const reached = [];
+    for (const u of cands) {
+      const r = await c.get(u);
+      reached.push(r);
+      if (r.status !== 200) continue;
+      if (!r.text && /gzip|octet/.test(ctOf(r))) return R.warn(`${code(u)} is compressed, so its contents weren't inspected.`, "Also publish an uncompressed `sitemap.xml`.", { links });
+      const d = parseXml(r.text);
+      if (!d) continue;
+      const root = d.documentElement.localName;
+      if (root === "sitemapindex") return R.pass([`Sitemap index at ${code(u)}${listed.includes(u) ? ", listed in robots.txt" : ""}`, `${plural(d.getElementsByTagNameNS("*", "sitemap").length, "child sitemap")}`], { links });
+      if (root !== "urlset") continue;
+      const locs = [...d.getElementsByTagNameNS("*", "loc")].map(l => l.textContent.trim());
+      const det = [`${code(u)}${listed.includes(u) ? ", listed in robots.txt" : ""}`, `${plural(locs.length, "URL")}`];
+      if (c.post) {
+        const inMap = locs.some(l => normUrl(l) === normUrl(c.post.url));
+        det.push(inMap ? "Includes the checked post." : "Doesn't include the checked post.");
+        if (!inMap) return R.warn(det, "Make sure the sitemap lists every published post.", { links, frac: 0.75 });
+      }
+      return R.pass(det, { links });
+    }
+    if (reached.every(r => r.error)) return R.skip("Couldn't check: sitemap locations were unreachable.");
+    return R.fail(`No sitemap found (tried ${cands.map(u => code(new URL(u).pathname)).join(", ")}).`, "Publish `/sitemap.xml` and reference it from robots.txt.", { links });
   } },
 
   // --- Feeds
-  { id: "feedDiscovery", sec: "feeds", w: 3, name: "Feed auto-discovery", doc: true, run(c) {
-    const inHead = c.feeds.filter(f => f.el === "link");
-    const list = c.feeds.map(f => `\`${f.type}\` ${f.href}${f.el === "a" ? " (link in body)" : ""}`);
-    if (inHead.length) return R.pass(list);
-    if (c.feeds.length) return R.warn(list.concat("Feeds are only linked from the page body."), `Add \`<link rel="alternate" type="${c.feeds[0].type}" href="${c.feeds[0].href}">\` to \`<head>\` so feed readers find it.`);
-    return R.fail("No `<link rel=\"alternate\">` pointing to a feed.", "Add `<link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed.xml\">` to `<head>`.");
-  } },
-  { id: "xmlFeed", sec: "feeds", w: 3, name: "RSS or Atom feed", async run(c) {
-    const disc = c.feeds.filter(f => /rss|atom/.test(f.type)).map(f => f.href);
-    const cands = [...new Set(disc.concat(["/feed.xml", "/feed", "/rss.xml", "/atom.xml", "/index.xml"].map(p => c.origin + p)))];
-    const reached = [];
-    for (const u of cands) {
-      const r = await c.get(u);
-      reached.push(r);
-      if (r.status !== 200) continue;
-      const f = parseXmlFeed(r.text);
-      if (f) {
-        const d = [`${f.kind.trim()} at \`${u}\`${viaNote(r)}`, `${f.items} item${f.items === 1 ? "" : "s"}${f.title ? `, titled “${trunc(f.title, 60)}”` : ""}`];
-        const links = [["W3C feed validator", `https://validator.w3.org/feed/check.cgi?url=${enc(u)}`]];
-        return f.items ? R.pass(d, { links }) : R.warn(d, "The feed has no items.", { links });
-      }
+  { id: "feedAny", sec: "feeds", w: 3, scope: "site", name: "Subscribable feed", async run(c) {
+    const fd = await c.feedsData();
+    if (!fd.found.length) {
+      if (fd.unreachable) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
+      return R.fail(`No RSS, Atom or JSON Feed found (tried ${fd.tried} locations).`, "Publish an RSS 2.0, Atom or JSON Feed and link it from `<head>`.", { links: [["RSS 2.0 spec", "https://www.rssboard.org/rss-specification"], ["jsonfeed.org", "https://www.jsonfeed.org"]] });
     }
-    if (unreachable(reached)) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
-    return R.fail(`No RSS or Atom feed found (tried ${cands.length} locations).`, "Publish an RSS 2.0 or Atom feed and link it from `<head>`.", { links: [["RSS 2.0 spec", "https://www.rssboard.org/rss-specification"]] });
+    const links = fd.found.map(f => f.kind === "json" ? ["JSON Feed validator", `https://validator.jsonfeed.org/?url=${enc(f.url)}`] : ["W3C feed validator", `https://validator.w3.org/feed/check.cgi?url=${enc(f.url)}`]);
+    const d = fd.found.map(f => `${f.format} at ${code(f.url)}${viaNote(f.res)}: ${plural(f.items.length, "item")}${f.title ? `, titled “${trunc(f.title, 50)}”` : ""}`);
+    const bad = fd.found.filter(f => !f.items.length || !f.valid);
+    return bad.length === fd.found.length ? R.warn(d, "The feed has no items or is missing required fields.", { links }) : R.pass(d, { links });
   } },
-  { id: "jsonFeed", sec: "feeds", w: 2, name: "JSON Feed", async run(c) {
-    const disc = c.feeds.filter(f => /json/.test(f.type)).map(f => f.href);
-    const cands = [...new Set(disc.concat(["/feed.json", "/jsonfeed", "/index.json"].map(p => c.origin + p)))];
-    const reached = [];
-    for (const u of cands) {
-      const r = await c.get(u);
-      reached.push(r);
-      if (r.status !== 200) continue;
-      const f = parseJsonFeed(r.text);
-      if (!f || !f.version) continue;
-      const links = [["JSON Feed validator", `https://validator.jsonfeed.org/?url=${enc(u)}`]];
-      const d = [`\`${u}\`${viaNote(r)}`, `Version \`${f.version}\`, ${f.items ?? 0} items${f.title ? `, titled “${trunc(f.title, 60)}”` : ""}`];
-      if (!f.valid) return R.warn(d, "A valid feed needs a jsonfeed.org `version`, a `title` and an `items` array.", { links });
-      if (!disc.length) return R.warn(d.concat("Not linked from the page."), `Add \`<link rel="alternate" type="application/feed+json" href="${u}">\` to \`<head>\`.`, { links });
-      return R.pass(d, { links });
+  { id: "feedBoth", sec: "feeds", w: 1, scope: "site", name: "Second feed format", async run(c) {
+    const fd = await c.feedsData();
+    if (!fd.found.length) return R.skip("No feed found.");
+    const kinds = uniq(fd.found.map(f => f.kind));
+    if (kinds.length === 2) return R.pass("Offers both an XML feed (RSS or Atom) and a JSON Feed.");
+    return kinds[0] === "xml"
+      ? R.fail("Only an RSS or Atom feed.", "Also publish a JSON Feed, for readers and tools that prefer JSON.", { links: [["jsonfeed.org", "https://www.jsonfeed.org"]] })
+      : R.fail("Only a JSON Feed.", "Also publish an RSS or Atom feed. Most feed readers expect one.", { links: [["RSS 2.0 spec", "https://www.rssboard.org/rss-specification"]] });
+  } },
+  { id: "feedDiscovery", sec: "feeds", w: 3, scope: "each", name: "Feed auto-discovery", async run(c, P) {
+    const rank = { head: 0, header: 1, body: 2 };
+    const all = P.rels("alternate", FEED_TYPES).sort((a, b) => rank[a.source] - rank[b.source]).filter((f, i, arr) => arr.findIndex(g => g.href === f.href) === i);
+    const advertised = all.filter(f => f.source !== "body");
+    const list = all.map(f => `${code(f.type)} ${f.href}${f.source === "body" ? " (link in body)" : f.source === "header" ? " (`Link` header)" : ""}`);
+    if (!all.length) return R.fail("No `<link rel=\"alternate\">` pointing to a feed.", "Add `<link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed.xml\">` to `<head>`.");
+    if (!advertised.length) return R.warn(list.concat("Feeds are only linked from the page body."), `Add \`<link rel="alternate" type="${all[0].type}" href="${all[0].href}">\` to \`<head>\` so feed readers find it.`);
+    // Formats that exist but aren't advertised in <head>.
+    const advKinds = new Set(advertised.map(f => feedKindOfType(f.type)));
+    const hidden = (await c.feedsData()).found.filter(f => !advKinds.has(f.kind));
+    if (hidden.length) {
+      const h = hidden[0];
+      return R.warn(list.concat(`${h.format} at ${code(h.url)} isn't advertised.`), `Add \`<link rel="alternate" type="${h.kind === "json" ? "application/feed+json" : h.format === "Atom" ? "application/atom+xml" : "application/rss+xml"}" href="${h.url}">\` to \`<head>\`.`, { frac: 0.75 });
     }
-    if (unreachable(reached)) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
-    return R.fail("No JSON Feed found.", "Publish a JSON Feed and link it with `type=\"application/feed+json\"`.", { links: [["jsonfeed.org", "https://www.jsonfeed.org"]] });
+    return R.pass(list);
+  } },
+  { id: "feedQuality", sec: "feeds", w: 2, scope: "site", name: "Feed quality", async run(c) {
+    const f = (await c.feedsData()).found[0];
+    if (!f) return R.skip("No feed found.");
+    const items = f.items;
+    if (!items.length) return R.fail(`${f.format} at ${code(f.url)} has no items.`, "Include your recent posts in the feed.");
+    const issues = [], fixes = [], d = [`Checked the ${f.format} at ${code(f.url)}.`];
+    const undated = items.filter(i => !i.date || isNaN(new Date(i.date)));
+    if (undated.length) { issues.push(`${plural(undated.length, "item")} with no valid date`); fixes.push("Give every item a publish date."); }
+    const badLinks = items.filter(i => !/^https?:\/\//.test(i.link || ""));
+    if (badLinks.length) { issues.push(`${plural(badLinks.length, "item")} without an absolute link`); fixes.push("Give every item an absolute link to the post."); }
+    const empty = items.filter(i => !i.content && !i.summary);
+    if (empty.length) { issues.push(`${plural(empty.length, "item")} with no content or summary`); fixes.push("Include the post content or a summary in every item."); }
+    const relative = items.filter(i => /(?:href|src)\s*=\s*["']?\/(?!\/)/i.test(i.content));
+    if (relative.length) { issues.push(`${plural(relative.length, "item")} with root-relative links or images in the content`); fixes.push("Make links and image URLs inside item content absolute, because feed readers show the content away from your site."); }
+    if (!f.self) { issues.push(f.kind === "json" ? "no `feed_url`" : "no `atom:link rel=\"self\"`"); fixes.push(f.kind === "json" ? "Add `feed_url` to the feed." : "Add `<atom:link rel=\"self\" href=\"…\" type=\"application/rss+xml\">` to the channel."); }
+    const full = items.filter(i => i.full).length;
+    d.push(full === items.length ? "Every item has full content." : full ? `${full} of ${plural(items.length, "item")} have full content; the rest are summaries.` : "Items carry summaries only.");
+    d.push(f.hub ? `WebSub hub: ${code(f.hub)}.` : "No WebSub hub (optional; lets readers get updates pushed).");
+    if (!issues.length) return R.pass(d);
+    return R.warn(d.concat(`Problems: ${issues.join("; ")}.`), fixes.join(" "), { frac: Math.max(0.4, 1 - 0.2 * issues.length) });
   } },
 
   // --- Structured data
-  { id: "hentry", sec: "structured", w: 2, name: "h-entry microformat", doc: true, run(c) {
-    const links = [["IndieWebify validator", `https://indiewebify.me/validate-h-entry/?url=${enc(c.url)}`]];
-    const e = c.doc.querySelector(".h-entry");
-    if (!e) {
-      const feed = c.doc.querySelector(".h-feed");
-      if (c.isRoot && feed) return R.pass(`h-feed found${feed.querySelectorAll(".h-entry").length ? ` with ${feed.querySelectorAll(".h-entry").length} entries` : ""}.`, { links });
-      return R.fail("No element with class `h-entry`.", "Wrap the post in `class=\"h-entry\"` and mark up `p-name`, `e-content`, `dt-published` and `u-url`.", { links: links.concat([["h-entry spec", "https://microformats.org/wiki/h-entry"]]) });
-    }
+  { id: "schemaData", sec: "structured", w: 3, scope: "each", name: "schema.org data", run(c, P) {
+    const links = [["Schema.org validator", `https://validator.schema.org/#url=${enc(P.url)}`]];
+    if (P.ld.errors.length) return R.fail(P.ld.errors, "Fix the JSON-LD syntax errors.", { links });
+    const t = nodes => uniq(nodes.flatMap(types)).map(code).join(", ") || "no types";
+    if (P.ld.count) return R.pass(`JSON-LD: ${plural(P.ld.count, "block")}, ${t(P.ld.nodes)}${P.micro.length || P.rdfa.length ? `. Also Microdata or RDFa: ${t([...P.micro, ...P.rdfa])}` : ""}`, { links });
+    if (P.micro.length || P.rdfa.length) return R.pass([`${P.micro.length ? "Microdata" : "RDFa"}: ${t([...P.micro, ...P.rdfa])}`, "JSON-LD is easier to maintain and preferred by most consumers, but this works."], { links });
+    return R.fail("No schema.org data (JSON-LD, Microdata or RDFa).", "Describe the page with schema.org JSON-LD.", { links });
+  } },
+  { id: "hentry", sec: "structured", w: 2, scope: "post", name: "h-entry microformat", run(c, P) {
+    const links = [["IndieWebify validator", `https://indiewebify.me/validate-h-entry/?url=${enc(P.url)}`]];
+    const e = P.hentry;
+    if (!e) return R.fail("No element with class `h-entry`.", "Wrap the post in `class=\"h-entry\"` and mark up `p-name`, `e-content`, `dt-published` and `u-url`.", { links: links.concat([["h-entry spec", "https://microformats.org/wiki/h-entry"]]) });
     const props = ["p-name", "e-content", "dt-published", "u-url"];
     const missing = props.filter(p => !e.querySelector("." + p) && !e.classList.contains(p));
     const found = props.filter(p => !missing.includes(p));
-    if (!missing.length) return R.pass(`h-entry with ${found.map(p => "`" + p + "`").join(", ")}`, { links });
-    return R.warn([`Found: ${found.map(p => "`" + p + "`").join(", ") || "none"}`, `Missing: ${missing.map(p => "`" + p + "`").join(", ")}`], "Add the missing properties inside the h-entry.", { links });
+    if (!missing.length) return R.pass(`h-entry with ${found.map(code).join(", ")}`, { links });
+    return R.warn([`Found: ${found.map(code).join(", ") || "none"}`, `Missing: ${missing.map(code).join(", ")}`], "Add the missing properties inside the h-entry.", { links, frac: found.length / props.length });
   } },
-  { id: "hcard", sec: "structured", w: 1, name: "Author h-card", doc: true, run(c) {
-    const a = c.doc.querySelector(".h-entry .p-author.h-card, .h-entry .p-author .h-card, .h-entry .h-card");
-    if (a) return R.pass(`Author: ${trunc(a.querySelector(".p-name")?.textContent || a.textContent, 50)}`);
-    const any = c.doc.querySelector(".h-card");
-    return any ? R.warn(`h-card found (“${trunc(any.textContent, 40)}”), but not marked as the post's author.`, "Mark the author inside the h-entry with `class=\"p-author h-card\"`.")
-      : R.fail("No h-card.", "Add an author h-card, for example `<a class=\"p-author h-card\" href=\"/\">Your Name</a>`.");
+  { id: "hfeed", sec: "structured", w: 1, scope: "home", name: "h-feed microformat", run(c, P) {
+    const links = [["h-feed spec", "https://microformats.org/wiki/h-feed"]];
+    const feed = P.doc.querySelector(".h-feed");
+    const entries = P.doc.querySelectorAll(".h-entry").length;
+    if (feed) return R.pass(`h-feed with ${plural(feed.querySelectorAll(".h-entry").length, "h-entry", "h-entries")}.`, { links });
+    if (entries > 1) return R.warn(`${entries} h-entries, but no \`h-feed\` wrapper.`, "Wrap the list of posts in `class=\"h-feed\"` and give it a `p-name`.", { links });
+    return R.fail("No h-feed and no h-entries on the home page.", "Mark up the list of posts as an `h-feed` containing `h-entry` items.", { links });
   } },
-  { id: "jsonld", sec: "structured", w: 3, name: "JSON-LD present and valid", doc: true, run(c) {
-    const links = [["Schema.org validator", `https://validator.schema.org/#url=${enc(c.url)}`]];
-    const { nodes, errors, count } = c.ld;
-    if (!count) return R.fail("No `<script type=\"application/ld+json\">` blocks.", "Describe the page with schema.org JSON-LD.", { links });
-    if (errors.length) return R.fail(errors, "Fix the JSON syntax errors.", { links });
-    return R.pass(`${count} block${count > 1 ? "s" : ""}, types: ${[...new Set(nodes.flatMap(types))].map(t => "`" + t + "`").join(", ") || "none"}`, { links });
+  { id: "author", sec: "structured", w: 2, scope: "post", name: "Author identified", run(c, P) {
+    const hcard = P.hentry?.querySelector(".p-author.h-card, .p-author .h-card") || P.hentry?.querySelector(".h-card");
+    const found = [
+      hcard && `h-card: ${trunc(hcard.querySelector(".p-name")?.textContent || hcard.textContent, 40)}`,
+      nameOf(P.article?.author).length && `schema.org \`author\`: ${nameOf(P.article.author).join(", ")}`,
+      P.rels("author").length && `\`rel="author"\` link to ${P.rels("author")[0].href}`,
+      P.meta("author") && `\`<meta name="author">\`: ${P.meta("author")}`
+    ].filter(Boolean);
+    return found.length ? R.pass(found) : R.fail("No author found in an h-card, schema.org `author`, `rel=\"author\"` link or `<meta name=\"author\">`.", "Mark up the author, ideally as `class=\"p-author h-card\"` and as the schema.org `author`.");
   } },
-  { id: "article", sec: "structured", w: 2, name: "Article schema", doc: true, run(c) {
+  { id: "article", sec: "structured", w: 2, scope: "post", name: "Article schema", run(c, P) {
     const links = [["TechArticle", "https://schema.org/TechArticle"]];
-    const art = c.ld.nodes.find(n => types(n).some(t => /(Article|BlogPosting|Report)$/.test(t)));
-    if (!art) {
-      const site = c.ld.nodes.find(n => types(n).some(t => /^(WebSite|Blog|Person|Organization|ProfilePage|CollectionPage)$/.test(t)));
-      if (c.isRoot && site) return R.pass(`Site-level type \`${types(site).join(", ")}\` (a home page needn't be an Article).`, { links });
-      return R.fail("No Article, BlogPosting or TechArticle node.", "Add a JSON-LD node with `@type` `BlogPosting` or `TechArticle`.", { links });
-    }
+    const art = P.article;
+    if (!art) return R.fail("No Article, BlogPosting or TechArticle in JSON-LD, Microdata or RDFa.", "Add a JSON-LD node with `@type` `BlogPosting` or `TechArticle`.", { links });
     const req = ["headline", "datePublished", "author"].filter(k => !art[k]);
     const rec = ["description", "image", "dateModified", "url"].filter(k => !art[k]);
-    const d = [`\`${types(art).join(", ")}\`${art.headline ? `: “${trunc(art.headline, 60)}”` : ""}`];
-    if (rec.length) d.push(`Optional properties not set: ${rec.map(k => "`" + k + "`").join(", ")}`);
-    return req.length ? R.warn(d.concat(`Missing ${req.map(k => "`" + k + "`").join(", ")}`), `Add ${req.join(", ")}.`, { links }) : R.pass(d, { links });
+    const d = [`${types(art).map(code).join(", ")}${art.headline ? `: “${trunc(art.headline, 60)}”` : ""}`];
+    const badDates = ["datePublished", "dateModified"].filter(k => art[k] && !ISO_DATE.test(String(art[k]).trim()));
+    const pub = [].concat(art.publisher || [])[0];
+    if (pub && typeof pub === "object" && types(pub).includes("Organization") && !pub.logo) rec.push("publisher.logo");
+    if (rec.length) d.push(`Optional properties not set: ${rec.map(code).join(", ")}`);
+    const problems = [req.length && `Missing ${req.map(code).join(", ")}.`, badDates.length && `${badDates.map(code).join(" and ")} isn't an ISO 8601 date.`].filter(Boolean);
+    if (problems.length) return R.warn(d.concat(problems), [req.length && `Add ${req.join(", ")}.`, badDates.length && "Use ISO 8601 dates such as `2026-06-28T10:31:11Z`."].filter(Boolean).join(" "), { links });
+    return R.pass(d, { links });
+  } },
+  { id: "siteSchema", sec: "structured", w: 2, scope: "home", name: "Site identity schema", run(c, P) {
+    const node = P.schema.find(n => types(n).some(t => /^(WebSite|Blog|Person|Organization|ProfilePage)$/.test(t)));
+    if (!node) return R.fail("No `WebSite`, `Blog`, `Person` or `Organization` node on the home page.", "Add a JSON-LD `WebSite` node with `name` and `url`, and a `Person` or `Organization` for the owner.", { links: [["WebSite", "https://schema.org/WebSite"]] });
+    return R.pass(`${types(node).map(code).join(", ")}${node.name ? `: “${trunc(nameOf(node.name)[0] || node.name, 50)}”` : ""}`);
   } },
 
   // --- Social previews
-  { id: "ogCore", sec: "social", w: 3, name: "OpenGraph basics", doc: true, run(c) {
+  { id: "ogCore", sec: "social", w: 3, scope: "each", name: "OpenGraph basics", run(c, P) {
     const links = [["opengraph.dev", "https://opengraph.dev"], ["ogp.me", "https://ogp.me"]];
     const keys = ["og:title", "og:type", "og:url", "og:image"];
-    const have = keys.filter(k => c.meta(k));
+    const have = keys.filter(k => P.meta(k));
     const missing = keys.filter(k => !have.includes(k));
-    const d = have.map(k => `\`${k}\`: ${trunc(c.meta(k), 70)}`);
+    const d = have.map(k => `${code(k)}: ${trunc(P.meta(k), 70)}`);
     if (!missing.length) return R.pass(d, { links });
     if (!have.length) return R.fail("No OpenGraph tags.", "Add `og:title`, `og:type`, `og:url` and `og:image` meta tags.", { links });
-    return R.warn(d.concat(`Missing ${missing.map(k => "`" + k + "`").join(", ")}`), `Add ${missing.join(", ")}.`, { links });
+    return R.warn(d.concat(`Missing ${missing.map(code).join(", ")}`), `Add ${missing.join(", ")}.`, { links, frac: have.length / keys.length });
   } },
-  { id: "ogDesc", sec: "social", w: 2, name: "OpenGraph description", doc: true, run(c) {
-    const d = c.meta("og:description");
-    return d ? R.pass(`“${trunc(d)}”`) : R.fail("No `og:description`.", "Add `<meta property=\"og:description\" content=\"…\">`.");
+  { id: "shareDesc", sec: "social", w: 2, scope: "each", name: "Share description", run(c, P) {
+    const og = P.meta("og:description"), meta = P.meta("description");
+    if (og) return R.pass(`\`og:description\`: “${trunc(og)}”`);
+    if (meta) return R.warn("No `og:description`. Slack, Discord and others fall back to the meta description, but Facebook and LinkedIn don't.", "Add `<meta property=\"og:description\">`, usually with the same text as the meta description.");
+    return R.fail("No `og:description` or meta description.", "Add `<meta property=\"og:description\" content=\"…\">`.");
   } },
-  { id: "ogImage", sec: "social", w: 1, name: "Share image details", doc: true, run(c) {
-    const img = c.meta("og:image");
+  { id: "ogImage", sec: "social", w: 1, scope: "each", name: "Share image details", run(c, P) {
+    const img = P.meta("og:image");
     if (!img) return R.skip("No `og:image` to inspect.");
-    const d = [`\`${trunc(img, 80)}\``];
-    const extras = ["og:image:width", "og:image:height", "og:image:alt"].filter(k => c.meta(k));
-    if (extras.length) d.push(`Also sets ${extras.map(k => "`" + k + "`").join(", ")}`);
+    const d = [code(trunc(img, 80))];
+    const extras = ["og:image:width", "og:image:height", "og:image:alt"].filter(k => P.meta(k));
+    if (extras.length) d.push(`Also sets ${extras.map(code).join(", ")}`);
     return /^https?:\/\//i.test(img) ? R.pass(d) : R.warn(d.concat("The URL is relative."), "Use an absolute URL; most scrapers ignore relative image paths.");
   } },
-  { id: "twitter", sec: "social", w: 1, name: "Twitter/X card", doc: true, run(c) {
-    const t = c.meta("twitter:card");
-    return t ? R.pass(`\`twitter:card\` = \`${t}\``) : R.fail("No `twitter:card`.", "Add `<meta name=\"twitter:card\" content=\"summary_large_image\">`.");
+  { id: "twitter", sec: "social", w: 1, scope: "each", name: "Twitter/X card", run(c, P) {
+    const t = P.meta("twitter:card");
+    return t ? R.pass(`${code("twitter:card")} = ${code(t)}`) : R.fail("No `twitter:card`.", "Add `<meta name=\"twitter:card\" content=\"summary_large_image\">`.");
+  } },
+
+  // --- Social web
+  { id: "fediCreator", sec: "socialweb", w: 1, scope: "post", name: "fediverse:creator", run(c, P) {
+    const links = [["Mastodon author attribution", "https://blog.joinmastodon.org/2024/07/highlighting-journalism-on-mastodon/"]];
+    const v = P.meta("fediverse:creator");
+    if (!v) return R.fail("No `<meta name=\"fediverse:creator\">`.", "Add `<meta name=\"fediverse:creator\" content=\"@you@your.instance\">` so Mastodon credits you on shared links.", { links });
+    return /^@?[\w.-]+@[\w.-]+\.\w+$/.test(v) ? R.pass(code(v), { links }) : R.warn(`${code(v)} isn't in \`@user@instance\` form.`, "Use the full handle, such as `@you@mastodon.social`.", { links });
+  } },
+  { id: "webmention", sec: "socialweb", w: 1, scope: "site", name: "Webmention endpoint", run(c) {
+    const links = [["Webmention spec", "https://www.w3.org/TR/webmention/"]];
+    for (const P of [c.post, c.home].filter(Boolean)) {
+      const e = P.rels("webmention")[0];
+      if (e) return R.pass(`${code(e.href)}${e.source === "header" ? " (from the `Link` header)" : ""}, on the ${P.label.toLowerCase()}.`, { links });
+    }
+    if (!c.pages.some(P => P.doc)) return R.skip("Page HTML unavailable.");
+    return R.fail("No Webmention endpoint advertised.", "Advertise an endpoint with `<link rel=\"webmention\" href=\"…\">`, for example from webmention.io, so other sites can notify you of replies.", { links });
+  } },
+  { id: "relmeBack", sec: "socialweb", w: 1, scope: "site", name: "rel=me verified", async run(c) {
+    const links = [["IndieWeb rel=me", "https://indieweb.org/rel-me"]];
+    const profiles = uniq(c.pages.flatMap(P => P.rels("me").map(l => l.href))).filter(h => { try { const u = new URL(h); return /^https?:$/.test(u.protocol) && !sameHost(u.hostname, c.host); } catch { return false; } }).slice(0, 8);
+    if (!profiles.length) return R.skip("No `rel=\"me\"` profile links to verify.");
+    const results = await Promise.all(profiles.map(async u => {
+      const host = new URL(u).hostname;
+      const r = await c.get(u);
+      if (r.error || r.status !== 200 || !r.text) return [host, "unknown"];
+      const doc = new DOMParser().parseFromString(r.text, "text/html");
+      const toSite = [...doc.querySelectorAll("a[href], link[href]")].filter(a => { try { return sameHost(new URL(a.getAttribute("href"), u).hostname, c.host); } catch { return false; } });
+      if (toSite.some(a => (a.getAttribute("rel") || "").toLowerCase().split(/\s+/).includes("me"))) return [host, "verified"];
+      return [host, toSite.length || r.text.includes(c.host) ? "mentions" : "unknown"];
+    }));
+    const by = s => uniq(results.filter(([, v]) => v === s).map(([h]) => h));
+    const d = [
+      by("verified").length && `Links back with \`rel="me"\`: ${by("verified").join(", ")}`,
+      by("mentions").length && `Mentions the site without \`rel="me"\`: ${by("mentions").join(", ")}`,
+      by("unknown").length && `Couldn't confirm (blocked, or needs JavaScript): ${by("unknown").join(", ")}`
+    ].filter(Boolean);
+    if (by("verified").length) return R.pass(d, { links });
+    return R.warn(d, "Add your site to each profile's website field, so the profile links back with `rel=\"me\"`. Mastodon then shows it as verified.", { links });
+  } },
+  { id: "webfinger", sec: "socialweb", w: 1, scope: "site", name: "WebFinger", async run(c) {
+    const links = [["WebFinger (RFC 7033)", "https://www.rfc-editor.org/rfc/rfc7033"]];
+    const creator = c.post?.meta("fediverse:creator") || c.home?.meta("fediverse:creator") || "";
+    const acct = /^@?([\w.-]+)@([\w.-]+)$/.exec(creator);
+    const resources = uniq([acct && sameHost(acct[2], c.host) && `acct:${acct[1]}@${acct[2]}`, `acct:${c.host}@${c.host}`, c.origin + "/"].filter(Boolean));
+    for (const res of resources) {
+      const r = await c.get(`${c.origin}/.well-known/webfinger?resource=${enc(res)}`);
+      if (r.status !== 200) continue;
+      let j; try { j = JSON.parse(r.text); } catch { continue; }
+      if (!j.subject) continue;
+      const self = (j.links || []).find(l => l.rel === "self" && /activity\+json|ld\+json/.test(l.type || ""));
+      return R.pass([`Answers for ${code(res)}: subject ${code(j.subject)}`, self ? `ActivityPub actor: ${code(self.href)}` : "No ActivityPub `self` link."], { links });
+    }
+    return R.skip("No WebFinger endpoint found. Only needed if you want the domain itself to be findable on the fediverse.", { links });
   } },
 
   // --- standard.site
-  { id: "pubWellKnown", sec: "standard", w: 3, name: "Publication verification file", async run(c) {
+  { id: "pubWellKnown", sec: "standard", w: 3, scope: "site", name: "Publication verification file", async run(c) {
     const links = [["standard.site", "https://standard.site"], ["Site validator", "https://site-validator.fly.dev/"]];
     const r = await c.pubWellKnown;
     const fix = "Serve the publication's AT-URI as plain text at `/.well-known/site.standard.publication`.";
@@ -580,88 +937,111 @@ const CHECKS = [
     if (r.status !== 200) return R.fail(`\`/.well-known/site.standard.publication\` returned HTTP ${r.status}.`, fix, { links });
     const p = parseAtUri(r.text);
     if (!p) return R.fail(`Response isn't an AT-URI: “${trunc(r.text, 60)}”.`, fix, { links });
-    if (p.collection !== "site.standard.publication") return R.warn(`\`${p.uri}\``, "The AT-URI should point to a `site.standard.publication` record.", { links });
-    return R.pass(`\`${p.uri}\``, { links });
+    if (p.collection !== "site.standard.publication") return R.warn(code(p.uri), "The AT-URI should point to a `site.standard.publication` record.", { links });
+    return R.pass(code(p.uri), { links });
   } },
-  { id: "pubRecord", sec: "standard", w: 2, name: "Publication record", async run(c) {
+  { id: "pubRecord", sec: "standard", w: 2, scope: "site", name: "Publication record", async run(c) {
     const uri = c.pubUri();
     if (!uri) return R.skip("No publication AT-URI found to resolve.");
     try {
       const v = await getRecord(uri);
-      const d = [`Name: “${trunc(v.name || "", 60)}”`, `URL: \`${v.url || "missing"}\``];
+      const d = [`Name: “${trunc(v.name || "", 60)}”`, `URL: ${code(v.url || "missing")}`];
       const links = [["View on pds.ls", `https://pds.ls/${uri}`]];
       if (!v.name || !v.url) return R.warn(d, "The publication record needs `name` and `url`.", { links });
-      const host = h => h.replace(/^www\./, "");
-      if (host(new URL(v.url).hostname) !== host(c.host)) return R.warn(d, `The record's \`url\` should be on ${c.host}.`, { links });
+      if (!sameHost(new URL(v.url).hostname, c.host)) return R.warn(d, `The record's \`url\` should be on ${c.host}.`, { links });
       return R.pass(d, { links });
-    } catch (e) { return R.fail(`Couldn't resolve \`${uri}\`: ${e.message}.`, "Check that the record exists in your PDS."); }
+    } catch (e) { return R.fail(`Couldn't resolve ${code(uri)}: ${e.message}.`, "Check that the record exists in your PDS."); }
   } },
-  { id: "pubLink", sec: "standard", w: 1, name: "Publication link tag", doc: true, async run(c) {
-    const h = c.doc.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href");
+  { id: "atprotoDid", sec: "standard", w: 2, scope: "site", name: "Domain verified for AT Protocol", async run(c) {
+    const links = [["Handle verification", "https://atproto.com/specs/handle#handle-resolution"]];
+    const host = c.host.replace(/^www\./, "");
+    const [wk, dns] = await Promise.all([
+      c.get(`https://${host}/.well-known/atproto-did`),
+      fetch(`https://cloudflare-dns.com/dns-query?name=_atproto.${host}&type=TXT`, { headers: { accept: "application/dns-json" } }).then(r => r.json()).catch(() => null)
+    ]);
+    const wkDid = !wk.error && wk.status === 200 && /^did:[a-z]+:\S+$/.test(wk.text.trim()) ? wk.text.trim() : null;
+    const dnsDid = (dns?.Answer || []).map(a => /did=(did:[a-z]+:[^"\s]+)/.exec(a.data || "")?.[1]).find(Boolean) || null;
+    if (!wkDid && !dnsDid) return R.fail(`No DID at ${code("/.well-known/atproto-did")} or in a ${code("_atproto." + host)} TXT record.`, `Publish your DID at \`https://${host}/.well-known/atproto-did\` or as a \`_atproto.${host}\` TXT record (\`did=did:plc:…\`), so the domain and your AT Protocol identity verify each other.`, { links });
+    const d = [wkDid && `Well-known file: ${code(wkDid)}`, dnsDid && `DNS TXT: ${code(dnsDid)}`].filter(Boolean);
+    const pub = parseAtUri(c.pubUri() || "");
+    let expected = null;
+    if (pub) { try { expected = await resolveDid(pub.repo); } catch {} }
+    const found = uniq([wkDid, dnsDid].filter(Boolean));
+    if (found.length > 1) return R.warn(d.concat("The two methods give different DIDs."), "Make the well-known file and the DNS record agree.", { links });
+    if (expected && found[0] !== expected) return R.warn(d.concat(`The standard.site publication belongs to ${code(expected)}.`), "Publish the standard.site records from the same account the domain verifies.", { links });
+    if (expected) d.push("Matches the account that owns the standard.site publication.");
+    return R.pass(d, { links });
+  } },
+  { id: "pubLink", sec: "standard", w: 1, scope: "home", name: "Publication link tag", async run(c, P) {
+    const h = P.doc.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href");
     if (!h) return R.fail("No `<link rel=\"site.standard.publication\">`.", "Add a link tag with the publication's AT-URI.");
     const wk = parseAtUri((await c.pubWellKnown).text || "");
-    if (wk && wk.uri !== h.trim()) return R.warn([`\`${h}\``, `The well-known file says \`${wk.uri}\`.`], "Make the link tag and the well-known file point to the same record.");
-    return R.pass(`\`${h}\`${wk ? " (matches the well-known file)" : ""}`);
+    if (wk && wk.uri !== h.trim()) return R.warn([code(h), `The well-known file says ${code(wk.uri)}.`], "Make the link tag and the well-known file point to the same record.");
+    return R.pass(`${code(h)}${wk ? " (matches the well-known file)" : ""}`);
   } },
-  { id: "docLink", sec: "standard", w: 2, name: "Document record", doc: true, async run(c) {
-    const h = c.doc.querySelector('link[rel="site.standard.document"]')?.getAttribute("href");
-    if (!h) return c.isRoot ? R.skip("Document links belong on individual posts. Check a post URL to test this.")
-      : R.fail("No `<link rel=\"site.standard.document\">`.", "Publish a `site.standard.document` record and link its AT-URI from the post's `<head>`.", { links: [["Publishing guide", "https://piccalil.li/blog/publishing-on-the-atmosphere-with-standardsite/"]] });
+  { id: "docLink", sec: "standard", w: 2, scope: "post", name: "Document record", async run(c, P) {
+    const h = P.doc.querySelector('link[rel="site.standard.document"]')?.getAttribute("href");
+    if (!h) return R.fail("No `<link rel=\"site.standard.document\">`.", "Publish a `site.standard.document` record and link its AT-URI from the post's `<head>`.", { links: [["Publishing guide", "https://piccalil.li/blog/publishing-on-the-atmosphere-with-standardsite/"]] });
     const links = [["View on pds.ls", `https://pds.ls/${h}`]];
-    try {
-      const v = await getRecord(h);
-      const d = [`\`${h}\``, `Title: “${trunc(v.title || "", 60)}”${v.publishedAt ? `, published ${String(v.publishedAt).slice(0, 10)}` : ""}`];
-      const pub = c.pubUri();
-      if (pub && v.site && v.site !== pub && !c.url.startsWith(v.site)) return R.warn(d.concat(`Record's \`site\` is \`${v.site}\`.`), "Set the document's `site` to your publication's AT-URI.", { links });
-      return R.pass(d, { links });
-    } catch (e) { return R.fail([`\`${h}\``, `Couldn't resolve: ${e.message}.`], "Check that the record exists in your PDS.", { links }); }
+    let v;
+    try { v = await getRecord(h); } catch (e) { return R.fail([code(h), `Couldn't resolve: ${e.message}.`], "Check that the record exists in your PDS.", { links }); }
+    const d = [code(h), `Title: “${trunc(v.title || "", 60)}”${v.publishedAt ? `, published ${String(v.publishedAt).slice(0, 10)}` : ""}`];
+    const problems = [], fixes = [];
+    const pub = c.pubUri();
+    if (pub && v.site && v.site !== pub && !P.url.startsWith(v.site)) { problems.push(`Record's \`site\` is ${code(v.site)}.`); fixes.push("Set the document's `site` to your publication's AT-URI."); }
+    const recordUrl = await c.docRecordUrl(v);
+    const pageUrl = P.rels("canonical")[0]?.href || P.url;
+    if (!recordUrl) { problems.push("The record has no `path` or `canonicalUrl` linking it to this page."); fixes.push("Set the record's `path` (relative to the publication URL) to this post's path."); }
+    else if (normUrl(recordUrl) !== normUrl(pageUrl)) { problems.push(`The record points to ${code(recordUrl)}, not this page.`); fixes.push("Update the record's `path` so it matches the post's canonical URL."); }
+    else d.push("The record's URL matches the page's canonical URL.");
+    return problems.length ? R.warn(d.concat(problems), fixes.join(" "), { links }) : R.pass(d, { links });
   } },
 
   // --- SocialSpec
-  { id: "ssFeed", sec: "socialspec", w: 2, name: "Feed at /feed.xml or /feed.json", async run(c) {
+  { id: "ssFeed", sec: "socialspec", w: 2, scope: "site", name: "Feed at /feed.xml or /feed.json", async run(c) {
     const links = [["socialspec.org", "https://socialspec.org"]];
     const tried = [], reached = [];
     for (const p of ["/feed.xml", "/feed.json"]) {
       const r = await c.get(c.origin + p);
       reached.push(r);
-      tried.push(`\`${p}\`: ${r.error ? "unreachable" : "HTTP " + r.status}`);
-      if (r.status === 200 && (parseXmlFeed(r.text) || parseJsonFeed(r.text)?.version)) return R.pass(`Valid feed at \`${p}\`${viaNote(r)}`, { links });
+      tried.push(`${code(p)}: ${r.error ? "unreachable" : "HTTP " + r.status}`);
+      if (r.status === 200 && parseFeed(r.text)) return R.pass(`Valid feed at ${code(p)}${viaNote(r)}`, { links });
     }
-    if (unreachable(reached)) return R.skip(tried);
+    if (reached.every(r => r.error)) return R.skip(tried);
     return R.fail(tried, "Serve your feed (or a redirect to it) at `/feed.xml` or `/feed.json`, where SocialSpec clients look first.", { links });
   } },
-  { id: "following", sec: "socialspec", w: 3, name: "following.opml (FollowSpec)", async run(c) {
+  { id: "following", sec: "socialspec", w: 3, scope: "site", name: "following.opml (FollowSpec)", async run(c) {
     const res = await specFile(c, "/.well-known/following.opml", {
-      ctWant: "text/x-opml", ctOk: ct => /opml|xml/.test(ct),
+      ctWant: "text/x-opml", ct: ct => ct === "text/x-opml" ? 1 : /^(application\/(xml|x-opml|opml\+xml)|text\/xml)$/.test(ct) ? 0.5 : 0,
       fix: "Publish an OPML subscription list at `/.well-known/following.opml`.",
       parse(t) {
         const d = parseXml(t);
         if (!d || d.documentElement.localName !== "opml") return { ok: false, msg: "Not a valid OPML document." };
         const n = d.querySelectorAll("outline[xmlUrl]").length;
-        return n ? { ok: true, msg: `OPML ${d.documentElement.getAttribute("version") || ""} listing ${n} feed${n > 1 ? "s" : ""}.` } : { ok: false, msg: "OPML has no `<outline xmlUrl>` entries." };
+        return n ? { ok: true, msg: `OPML ${d.documentElement.getAttribute("version") || ""} listing ${plural(n, "feed")}.` } : { ok: false, msg: "OPML has no `<outline xmlUrl>` entries." };
       }
     });
     res.links = [["followspec.org", "https://followspec.org"]];
-    if (c.doc?.querySelector('link[rel~="following"], link[rel~="blogroll"]')) res.detail.push("Also linked from the page with `rel=\"following\"` or `rel=\"blogroll\"`.");
+    if (c.pages.some(P => P.rels("following").length || P.rels("blogroll").length)) res.detail.push("Also linked from the page with `rel=\"following\"` or `rel=\"blogroll\"`.");
     return res;
   } },
-  { id: "about", sec: "socialspec", w: 3, name: "about.md (AboutSpec)", async run(c) {
+  { id: "about", sec: "socialspec", w: 3, scope: "site", name: "about.md (AboutSpec)", async run(c) {
     const res = await specFile(c, "/.well-known/about.md", {
-      ctWant: "text/markdown", ctOk: ct => ct === "text/markdown",
+      ctWant: "text/markdown", ct: ct => ct === "text/markdown" ? 1 : ct === "text/x-markdown" ? 0.5 : 0,
       fix: "Publish a Markdown profile at `/.well-known/about.md`.",
       parse(t) {
         if (!t.trim()) return { ok: false, msg: "File is empty." };
         const links = (t.match(/\]\([^)]+\)|https?:\/\/\S+/g) || []).length;
-        const fm = /^---\n[\s\S]*?\n---/.test(t) ? "front matter, " : "";
-        return { ok: true, msg: `${t.length.toLocaleString()} characters, ${fm}${links} link${links === 1 ? "" : "s"}.` };
+        const fm = frontMatter(t) ? "front matter, " : "";
+        return { ok: true, msg: `${t.length.toLocaleString()} characters, ${fm}${plural(links, "link")}.` };
       }
     });
     res.links = [["aboutspec.org", "https://aboutspec.org"]];
     return res;
   } },
-  { id: "contact", sec: "socialspec", w: 3, name: "contact.vcf (ContactSpec)", async run(c) {
+  { id: "contact", sec: "socialspec", w: 3, scope: "site", name: "contact.vcf (ContactSpec)", async run(c) {
     const res = await specFile(c, "/.well-known/contact.vcf", {
-      ctWant: "text/vcard", ctOk: ct => ct === "text/vcard",
+      ctWant: "text/vcard", ct: ct => ct === "text/vcard" ? 1 : ct === "text/x-vcard" || ct === "text/directory" ? 0.5 : 0,
       fix: "Publish a vCard (3.0 or newer) at `/.well-known/contact.vcf`.",
       parse(t) {
         if (!/BEGIN:VCARD/i.test(t) || !/END:VCARD/i.test(t)) return { ok: false, msg: "Not a vCard (missing `BEGIN:VCARD` or `END:VCARD`)." };
@@ -676,55 +1056,195 @@ const CHECKS = [
     res.links = [["contactspec.org", "https://contactspec.org"]];
     return res;
   } },
+  { id: "caching", sec: "socialspec", w: 1, scope: "site", name: "Caching validators", async run(c) {
+    if (!hasMetaProxy()) return R.skip(NEEDS_PROXY);
+    const paths = ["/feed.xml", "/feed.json", "/.well-known/following.opml", "/.well-known/about.md", "/.well-known/contact.vcf"];
+    const rs = await Promise.all(paths.map(async p => [p, await c.get(c.origin + p, { preferProxy: true })]));
+    const present = rs.filter(([, r]) => r.status === 200 && !looksHtml(r.text));
+    if (!present.length) return R.skip("None of the SocialSpec files were found.");
+    const lacking = present.filter(([, r]) => !r.headers?.etag && !r.headers?.["last-modified"]).map(([p]) => p);
+    const d = present.map(([p, r]) => `${code(p)}: ${[r.headers?.etag && "ETag", r.headers?.["last-modified"] && "Last-Modified"].filter(Boolean).join(" and ") || "neither"}`);
+    if (!lacking.length) return R.pass(d.concat("Subscribers can poll with `If-None-Match` or `If-Modified-Since`."));
+    return R.warn(d, "Send an `ETag` or `Last-Modified` header so subscribers can make cheap conditional requests.", { frac: 1 - lacking.length / present.length });
+  } },
+
+  // --- Consistency
+  { id: "consTitle", sec: "consistency", w: 2, scope: "post", name: "Title agrees", async run(c, P) { return compareFacts(await c.facts(P), "title"); } },
+  { id: "consDate", sec: "consistency", w: 2, scope: "post", name: "Publish date agrees", async run(c, P) { return compareFacts(await c.facts(P), "date"); } },
+  { id: "consUrl", sec: "consistency", w: 2, scope: "post", name: "URL agrees", async run(c, P) { return compareFacts(await c.facts(P), "url"); } },
+  { id: "consAuthor", sec: "consistency", w: 1, scope: "post", name: "Author agrees", async run(c, P) { return compareFacts(await c.facts(P), "author"); } },
 
   // --- Agent accessibility (optional)
-  { id: "mdAlt", sec: "agents", w: 2, name: "Markdown alternate", doc: true, async run(c) {
-    const h = c.doc.querySelector('link[rel~="alternate"][type="text/markdown" i]')?.getAttribute("href");
-    if (!h) return R.fail("No `<link rel=\"alternate\" type=\"text/markdown\">`.", "Generate a Markdown copy of each page and link it from `<head>`.", { links: [["isitagentready", "https://isitagentready.com/"]] });
-    const u = c.abs(h);
-    const r = await c.get(u);
-    if (r.error) return R.skip(`Couldn't check \`${u}\`: ${r.error}.`);
-    if (r.status !== 200 || looksHtml(r.text)) return R.warn(`\`${u}\` returned ${r.error || "HTTP " + r.status}${looksHtml(r.text) ? " with HTML" : ""}.`, "Make sure the linked Markdown file is published.");
-    return R.pass([`\`${u}\`${viaNote(r)}`, `${r.text.length.toLocaleString()} characters of Markdown.`]);
+  { id: "markdown", sec: "agents", w: 3, scope: "post", noDoc: true, name: "Markdown version", async run(c, P) {
+    const links = [["isitagentready", "https://isitagentready.com/"]];
+    const alt = P.rels("alternate", /markdown/)[0];
+    let altOk = null;
+    if (alt) { const r = await c.get(alt.href); altOk = r.error ? null : r.status === 200 && !looksHtml(r.text); }
+    const neg = await c.get(P.url, { accept: "text/markdown" });
+    const negOk = neg.error || neg.proxyKind === "template" && looksHtml(neg.text) ? null : !looksHtml(neg.text) && neg.status === 200;
+    const d = [
+      alt ? `Alternate link: ${code(alt.href)}${altOk ? "" : altOk === false ? " (doesn't load)" : " (couldn't check)"}` : P.doc ? "No `<link rel=\"alternate\" type=\"text/markdown\">`." : "Couldn't read the page to look for an alternate link.",
+      negOk ? `\`Accept: text/markdown\` returns ${code(ctOf(neg) || "unknown")}${neg.finalUrl !== P.url ? ` from ${code(neg.finalUrl)}` : ""}.` : negOk === false ? `\`Accept: text/markdown\` still returns ${code(ctOf(neg) || "HTML")}.` : "Content negotiation couldn't be checked."
+    ];
+    if (altOk && negOk) return R.pass(d.concat("Markdown is offered both ways."), { links });
+    if (altOk || negOk) return R.warn(d, altOk ? "Also serve (or redirect to) the Markdown version when a client sends `Accept: text/markdown`." : "Also link the Markdown version with `<link rel=\"alternate\" type=\"text/markdown\" href=\"…\">`.", { links, frac: 0.75 });
+    if (altOk === null && negOk === null) return R.skip(d);
+    return R.fail(d, "Generate a Markdown copy of each page, link it with `rel=\"alternate\"` and serve it for `Accept: text/markdown`.", { links });
   } },
-  { id: "mdNeg", sec: "agents", w: 2, name: "Markdown content negotiation", async run(c) {
-    const r = await c.get(c.url, { accept: "text/markdown" });
-    if (r.error) return R.skip(`Couldn't request the page: ${r.error}.`);
-    const ct = (r.contentType || "").split(";")[0];
-    const moved = r.finalUrl && r.finalUrl !== c.url && /\.md($|\?)/.test(r.finalUrl);
-    if (!looksHtml(r.text) && (ct === "text/markdown" || moved || r.status === 200)) {
-      return R.pass([`\`Accept: text/markdown\` returns \`${ct || "unknown"}\`${moved ? ` from \`${r.finalUrl}\`` : ""}.`]);
-    }
-    if (r.proxyKind === "template") return R.warn("The proxy returned HTML. It may not forward the `Accept` header, so this result isn't conclusive.", "Allow CORS on the page, or check it directly with `curl -H 'Accept: text/markdown'`.");
-    return R.fail(`\`Accept: text/markdown\` still returns \`${ct || "HTML"}\`.`, "Serve (or redirect to) the Markdown version when a client sends `Accept: text/markdown`.");
+  { id: "vary", sec: "agents", w: 2, scope: "post", noDoc: true, name: "Vary: Accept", async run(c, P) {
+    if (!hasMetaProxy()) return R.skip(NEEDS_PROXY);
+    const [plain, neg] = await Promise.all([c.get(P.url, { preferProxy: true }), c.get(P.url, { accept: "text/markdown", preferProxy: true })]);
+    if (plain.error || neg.error) return R.skip(`Couldn't request the page: ${plain.error || neg.error}.`);
+    if (looksHtml(neg.text) || neg.status !== 200) return R.skip("The page doesn't negotiate Markdown, so `Vary: Accept` isn't needed.");
+    const varies = h => /(^|,)\s*(accept|\*)\s*(,|$)/i.test(h?.vary || "");
+    const uncached = h => /no-store|no-cache|private|max-age=0\b/i.test(h?.["cache-control"] || "");
+    const first = neg.redirects?.[0];
+    const negHeaders = first ? first.headers : neg.headers;
+    const what = first ? `The ${first.status} redirect for \`Accept: text/markdown\`` : "The Markdown response";
+    const issues = [!varies(plain.headers) && !uncached(plain.headers) && "The HTML response has no `Vary: Accept`.", !varies(negHeaders) && !uncached(negHeaders) && `${what} has no \`Vary: Accept\`.`].filter(Boolean);
+    if (!issues.length) return R.pass(["Both the HTML response and the Markdown response vary on `Accept` (or aren't cacheable), so caches keep them apart."]);
+    return R.warn(issues.concat("Without it, a shared cache between your server and the reader can serve the cached HTML to an agent asking for Markdown, or the reverse."), "Send `Vary: Accept` on every response from a URL that negotiates content, including the redirect.", { frac: 1 - 0.5 * issues.length });
   } },
-  { id: "llms", sec: "agents", w: 2, name: "llms.txt", async run(c) {
+  { id: "llms", sec: "agents", w: 2, scope: "site", name: "llms.txt", async run(c) {
     const links = [["llmstxt.org", "https://llmstxt.org"]];
     const r = await c.get(c.origin + "/llms.txt");
     const fix = "Publish `/llms.txt`: an H1 with the site name, a short summary and lists of links to key pages.";
-    if (r.error) return R.skip(`Couldn't check \`/llms.txt\`: ${r.error}.`, { links });
-    if (r.status !== 200 || looksHtml(r.text) || !r.text.trim()) return R.fail(`\`/llms.txt\` returned ${r.status !== 200 ? "HTTP " + r.status : "no usable text"}.`, fix, { links });
+    if (r.error) return R.skip(`Couldn't check ${code("/llms.txt")}: ${r.error}.`, { links });
+    if (r.status !== 200 || looksHtml(r.text) || !r.text.trim()) return R.fail(`${code("/llms.txt")} returned ${r.status !== 200 ? "HTTP " + r.status : "no usable text"}.`, fix, { links });
     const first = r.text.split("\n").find(l => l.trim());
     const n = (r.text.match(/\]\([^)]+\)/g) || []).length;
-    const d = [`${r.text.length.toLocaleString()} characters, ${n} link${n === 1 ? "" : "s"}${viaNote(r)}.`];
+    const d = [`${r.text.length.toLocaleString()} characters, ${plural(n, "link")}${viaNote(r)}.`];
     return /^#\s+\S/.test(first) ? R.pass([`Title: “${trunc(first.replace(/^#\s+/, ""), 60)}”`].concat(d), { links })
       : R.warn(d.concat("Doesn't start with an H1."), "Start the file with `# Site name`.", { links });
   } },
-  { id: "aiCatalog", sec: "agents", w: 2, name: "AI catalog", async run(c) {
-    const h = c.doc?.querySelector('link[rel~="ai-catalog"]')?.getAttribute("href");
-    const u = h ? c.abs(h) : c.origin + "/.well-known/ai-catalog.json";
-    const r = await c.get(u);
+  { id: "aiCatalog", sec: "agents", w: 2, scope: "site", name: "AI catalog", async run(c) {
+    const links = [["AI Catalog", "https://github.com/Agent-Card/ai-catalog"]];
+    const h = c.pages.flatMap(P => P.rels("ai-catalog"))[0]?.href;
+    const u = h || c.origin + "/.well-known/ai-catalog.json";
+    const j = await c.catalog();
     const fix = "Publish `/.well-known/ai-catalog.json` listing your agent-facing endpoints, such as MCP server cards, and link it with `rel=\"ai-catalog\"`.";
-    if (r.error) return R.skip(`Couldn't check \`${u}\`: ${r.error}.`);
-    if (r.status !== 200) return R.fail(`\`${u}\` returned HTTP ${r.status}.`, fix);
-    let j; try { j = JSON.parse(r.text); } catch { return R.fail(`\`${u}\` isn't valid JSON.`, fix); }
-    const entries = Array.isArray(j.entries) ? j.entries : null;
-    const d = [`\`${u}\`${viaNote(r)}`, `Spec version \`${j.specVersion || "missing"}\`, ${entries ? entries.length : 0} entr${entries?.length === 1 ? "y" : "ies"}${entries?.length ? ": " + entries.slice(0, 4).map(e => e.displayName || e.identifier).join(", ") : ""}`];
-    if (!j.specVersion || !entries) return R.warn(d, "Include `specVersion` and an `entries` array.");
-    if (!h) return R.warn(d.concat("Not linked from the page."), "Add `<link rel=\"ai-catalog\" type=\"application/ai-catalog+json\" href=\"/.well-known/ai-catalog.json\">`.");
-    return R.pass(d);
+    if (j.error) return j.error === "unreachable" ? R.skip(`Couldn't check ${code(u)}.`, { links }) : R.fail(`${code(u)}: ${j.error}.`, fix, { links });
+    const entries = Array.isArray(j.data.entries) ? j.data.entries : null;
+    const d = [code(u), `Spec version ${code(j.data.specVersion || "missing")}, ${plural(entries?.length || 0, "entry", "entries")}`];
+    if (!j.data.specVersion || !entries) return R.warn(d, "Include `specVersion` and an `entries` array.", { links });
+    // Each entry should resolve to the document it describes.
+    const checks = await Promise.all(entries.slice(0, 5).map(async e => {
+      if (!e.url) return `${e.displayName || e.identifier}: no \`url\``;
+      const r = await c.get(e.url);
+      if (r.error || r.status !== 200) return `${e.displayName || e.identifier}: ${code(e.url)} returned ${r.error || "HTTP " + r.status}`;
+      try { JSON.parse(r.text); } catch { return `${e.displayName || e.identifier}: ${code(e.url)} isn't JSON`; }
+      if (e.type && ctOf(r) && ctOf(r) !== e.type.toLowerCase() && !/json/.test(ctOf(r))) return `${e.displayName || e.identifier}: served as ${code(ctOf(r))}, listed as ${code(e.type)}`;
+      return null;
+    }));
+    const broken = checks.filter(Boolean);
+    d.push(broken.length ? `Problems: ${broken.join("; ")}.` : `Every entry resolves: ${entries.slice(0, 5).map(e => e.displayName || e.identifier).join(", ")}.`);
+    if (broken.length) return R.warn(d, "Fix the entries whose URLs don't resolve to the document they describe.", { links });
+    if (!h) return R.warn(d.concat("Not linked from the page."), "Add `<link rel=\"ai-catalog\" type=\"application/ai-catalog+json\" href=\"/.well-known/ai-catalog.json\">`.", { links });
+    return R.pass(d, { links });
+  } },
+  { id: "agentCard", sec: "agents", w: 1, scope: "site", name: "A2A agent card", async run(c) {
+    const links = [["A2A agent discovery", "https://a2a-protocol.org/latest/topics/agent-discovery/"]];
+    const cat = await c.catalog();
+    const fromCatalog = (cat.data?.entries || []).filter(e => /a2a|agent-card/i.test(e.type || "")).map(e => e.url);
+    for (const u of uniq([...fromCatalog, c.origin + "/.well-known/agent-card.json", c.origin + "/.well-known/agent.json"])) {
+      const r = await c.get(u);
+      if (r.status !== 200) continue;
+      let j; try { j = JSON.parse(r.text); } catch { continue; }
+      if (!j.name) return R.warn(`${code(u)} has no \`name\`.`, "Agent cards need at least `name`, `url` and `skills`.", { links });
+      return R.pass([`${code(u)}: “${trunc(j.name, 50)}”`, `${plural((j.skills || []).length, "skill")}${j.url ? `, endpoint ${code(j.url)}` : ""}`], { links });
+    }
+    return R.skip("No agent card. Only needed if the site runs an A2A agent.", { links });
   } }
 ];
+
+// ---------- consistency ----------
+// Gathers what each format says about the post, so the Consistency checks can compare them.
+async function gatherFacts(c, P) {
+  const f = { title: [], date: [], url: [], author: [] };
+  const add = (k, source, v) => { for (const x of [].concat(v || [])) if (x && String(x).trim()) f[k].push({ source, value: String(x).trim() }); };
+  const doc = P.doc, art = P.article, e = P.hentry;
+  if (doc) {
+    add("title", "`<title>`", doc.querySelector("title")?.textContent);
+    add("title", "`og:title`", P.meta("og:title"));
+    add("url", "canonical", P.rels("canonical")[0]?.href);
+    add("url", "`og:url`", P.meta("og:url"));
+    add("date", "`article:published_time`", P.meta("article:published_time"));
+    add("author", "`<meta name=\"author\">`", P.meta("author"));
+  }
+  if (art) {
+    add("title", "schema.org `headline`", art.headline);
+    add("date", "schema.org `datePublished`", art.datePublished);
+    add("url", "schema.org `url`", art.url && P.abs(art.url));
+    const main = art.mainEntityOfPage;
+    add("url", "schema.org `mainEntityOfPage`", typeof main === "string" ? P.abs(main) : main?.["@id"] && P.abs(main["@id"]));
+    add("author", "schema.org `author`", nameOf(art.author));
+  }
+  if (e) {
+    add("title", "h-entry `p-name`", e.querySelector(".p-name")?.textContent);
+    const pub = e.querySelector(".dt-published");
+    add("date", "h-entry `dt-published`", pub && (pub.getAttribute("datetime") || pub.textContent));
+    const u = e.querySelector(".u-url");
+    add("url", "h-entry `u-url`", u && P.abs(u.getAttribute("href") || ""));
+    const a = e.querySelector(".p-author");
+    add("author", "h-entry `p-author`", a && (a.querySelector(".p-name")?.textContent || a.textContent));
+  }
+  // Markdown front matter, from the alternate link or content negotiation.
+  const mdUrl = P.rels("alternate", /markdown/)[0]?.href;
+  const md = mdUrl ? await c.get(mdUrl) : await c.get(P.url, { accept: "text/markdown" });
+  const fm = md && !md.error && md.status === 200 && !looksHtml(md.text) ? frontMatter(md.text) : null;
+  if (fm) {
+    add("title", "Markdown front matter", fm.title);
+    add("date", "Markdown front matter", fm.date || fm.published);
+    add("url", "Markdown front matter", fm.canonical || fm.url);
+    add("author", "Markdown front matter", fm.author);
+  }
+  // The standard.site document record.
+  const docUri = doc?.querySelector('link[rel="site.standard.document"]')?.getAttribute("href");
+  if (docUri) {
+    try {
+      const v = await getRecord(docUri);
+      add("title", "standard.site record", v.title);
+      add("date", "standard.site record", v.publishedAt);
+      add("url", "standard.site record", await c.docRecordUrl(v));
+      add("author", "standard.site record", v.contributor?.displayName || [].concat(v.contributors || []).map(x => x.displayName));
+    } catch {}
+  }
+  // The matching feed item.
+  const target = normUrl(P.rels("canonical")[0]?.href || P.url);
+  for (const feed of (await c.feedsData()).found) {
+    const item = feed.items.find(i => i.link && normUrl(i.link, feed.url) === target);
+    if (!item) continue;
+    const label = `${feed.format} item`;
+    add("title", label, item.title);
+    add("date", label, item.date);
+    add("url", label, new URL(item.link, feed.url).href);
+    add("author", label, item.author);
+  }
+  return f;
+}
+
+const FACT = {
+  title: { norm: v => v.toLowerCase().replace(/[“”"'‘’]/g, "").replace(/\s+/g, " ").trim(), same: (a, b) => a === b || a.startsWith(b + " ") || b.startsWith(a + " "), fix: "Use the same title everywhere (a site-name suffix in `<title>` is fine)." },
+  date: { norm: v => { const d = new Date(v); return isNaN(d) ? "invalid: " + v : d.toISOString().slice(0, 10); }, same: (a, b) => a === b, fix: "Publish the same date in every format, generated from one source such as the front matter." },
+  url: { norm: v => normUrl(v), same: (a, b) => a === b, fix: "Use the canonical URL everywhere: `og:url`, schema.org `url`, the h-entry `u-url`, the feed and the standard.site record." },
+  author: { norm: v => v.toLowerCase().replace(/\s+/g, " ").trim(), same: (a, b) => a === b || a.includes(b) || b.includes(a), fix: "Name the author the same way in every format." }
+};
+function compareFacts(facts, key) {
+  const list = facts[key];
+  const F = FACT[key];
+  if (list.length < 2) return R.skip(list.length ? `Only one source (${list[0].source}) to compare.` : "No sources to compare.");
+  const groups = [];
+  for (const x of list) {
+    const n = F.norm(x.value);
+    const g = groups.find(g => F.same(g.norm, n));
+    if (g) g.items.push(x); else groups.push({ norm: n, items: [x] });
+  }
+  groups.sort((a, b) => b.items.length - a.items.length);
+  const sources = g => uniq(g.items.map(i => i.source)).join(", ");
+  const shown = g => key === "date" ? g.norm : trunc(g.items[0].value, 70);
+  if (groups.length === 1) return R.pass(`${plural(list.length, "source")} agree on ${key === "date" ? code(shown(groups[0])) : "“" + shown(groups[0]) + "”"}: ${sources(groups[0])}.`);
+  return R.warn(groups.map((g, i) => `${i === 0 ? "Most say" : "But"} ${key === "date" ? code(shown(g)) : "“" + shown(g) + "”"}: ${sources(g)}.`), F.fix, { frac: groups[0].items.length / list.length });
+}
 
 // ---------- rendering ----------
 const ICON = { pass: "✓", warn: "!", fail: "✕", skip: "–", pending: "·", running: "…" };
@@ -750,7 +1270,7 @@ function renderRow(chk, r) {
   el.innerHTML = `
     <div class="pill" data-s="${r.status}" aria-label="${r.status}">${ICON[r.status]}</div>
     <div class="body">
-      <div class="top"><span class="name">${esc(chk.name)}</span><span class="weight">${W[chk.w]}</span></div>
+      <div class="top"><span class="name">${esc(chk.name)}</span><span class="weight">${SCOPE[chk.scope]} · ${W[chk.w]}</span></div>
       ${r.detail?.length ? `<ul>${r.detail.map(d => `<li>${fmt(d)}</li>`).join("")}</ul>` : ""}
       ${r.fix && r.status !== "pass" ? `<p class="fix">${fmt(r.fix)}</p>` : ""}
       ${r.links?.length ? `<div class="links">${r.links.map(([l, h]) => `<a href="${esc(h)}" target="_blank" rel="noopener">${esc(l)} ↗</a>`).join("")}</div>` : ""}
@@ -763,9 +1283,10 @@ function tally(checks) {
   checks.forEach(c => { const r = results[c.id]; if (r && ["pass", "warn", "fail"].includes(r.status)) { got += credit(r) * c.w; max += c.w; } });
   return { got, max, pct: max ? Math.round(got / max * 100) : null };
 }
+const coreChecks = () => CHECKS.filter(c => !SECTIONS.find(s => s.id === c.sec).optional);
 
 function renderSummary() {
-  const core = tally(CHECKS.filter(c => !SECTIONS.find(s => s.id === c.sec).optional));
+  const core = tally(coreChecks());
   $("#score").textContent = core.pct ?? "–";
   $("#arc").style.strokeDashoffset = 326.73 * (1 - (core.pct ?? 0) / 100);
   $("#bars").innerHTML = SECTIONS.map(s => {
@@ -775,9 +1296,36 @@ function renderSummary() {
   }).join("");
 }
 
+// Combines one check's results for the home page and the post.
+function mergeResults(list) {
+  const scored = list.filter(([, r]) => r.status !== "skip");
+  if (!scored.length) return { status: "skip", detail: list.flatMap(([P, r]) => r.detail.map(d => `${P.label}: ${d}`)) };
+  const statuses = scored.map(([, r]) => r.status);
+  const status = statuses.every(s => s === "pass") ? "pass" : statuses.every(s => s === "fail") ? "fail" : "warn";
+  return {
+    status,
+    frac: scored.reduce((a, [, r]) => a + credit(r), 0) / scored.length,
+    detail: list.flatMap(([P, r]) => r.detail.map(d => `${P.label}: ${d}`)),
+    fix: uniq(scored.map(([, r]) => r.fix).filter(Boolean)).join(" "),
+    links: uniq(list.flatMap(([, r]) => r.links || []).map(l => JSON.stringify(l))).map(l => JSON.parse(l))
+  };
+}
+
+async function runCheck(chk, c) {
+  if (chk.scope === "site") return chk.run(c);
+  const pages = chk.scope === "each" ? c.pages : [c[chk.scope]].filter(Boolean);
+  if (!pages.length) return R.skip(chk.scope === "post"
+    ? (c.mode === "site" ? "No post found to check. Enter a post URL instead." : "Only applies to posts. Check a post URL, or switch to whole-site mode.")
+    : "Only applies to the home page. Switch to whole-site mode to include it.");
+  const list = await Promise.all(pages.map(async P => [P, !P.doc && !chk.noDoc ? R.skip("Page HTML unavailable.") : await chk.run(c, P)]));
+  return list.length === 1 ? list[0][1] : mergeResults(list);
+}
+
 // ---------- run ----------
-let lastUrl = null;
+let lastUrl = null, lastPages = [], runSeq = 0;
 async function run(rawUrl) {
+  const runId = ++runSeq;
+  const stale = () => runId !== runSeq;
   let url;
   try { url = new URL(/^https?:\/\//i.test(rawUrl) ? rawUrl : "https://" + rawUrl).href; }
   catch { showNotice("That doesn't look like a URL. Try something like https://example.com/blog/post/."); return; }
@@ -789,87 +1337,120 @@ async function run(rawUrl) {
   atCache.clear();
   proxyTrouble = null;
   const u = new URL(url);
+  const s = settings();
   $("#target").innerHTML = `Checking <strong>${esc(url)}</strong>…`;
   CHECKS.forEach(c => renderRow(c, { status: "running", detail: [] }));
   renderSummary();
 
-  // Memoised fetches, keyed on URL + Accept.
+  // Memoised fetches, keyed on URL, Accept and whether the proxy is required.
   const cache = new Map();
   const get = (target, opts = {}) => {
-    const k = target + "|" + (opts.accept || "");
+    const k = `${target}|${opts.accept || ""}|${opts.preferProxy ? 1 : 0}`;
     if (!cache.has(k)) cache.set(k, fetchSmart(target, opts));
     return cache.get(k);
   };
 
-  const s = settings();
-  let pageRes, html = null;
-  if (s.pasted) { html = s.pasted; pageRes = { via: "paste", status: 200, finalUrl: url }; }
-  else {
-    pageRes = await get(url);
-    if (!pageRes.error && pageRes.status === 200) html = pageRes.text;
-  }
-  const doc = html ? new DOMParser().parseFromString(html, "text/html") : null;
-  const base = pageRes.finalUrl || url;
-  const abs = h => { try { return new URL(h, base).href; } catch { return h; } };
-
-  const c = {
-    url, origin: u.origin, host: u.hostname, isRoot: u.pathname === "/" || u.pathname === "",
-    doc, get, abs,
-    meta: k => doc?.querySelector(`meta[property="${k}" i], meta[name="${k}" i]`)?.getAttribute("content")?.trim() || "",
-    feeds: doc ? [...doc.querySelectorAll('link[rel~="alternate" i][type], a[rel~="alternate" i][type]')]
-      .filter(e => /rss|atom|feed\+json|application\/json/i.test(e.getAttribute("type")))
-      .map(e => ({ type: e.getAttribute("type").toLowerCase(), href: abs(e.getAttribute("href")), el: e.localName })) : [],
-    ld: doc ? jsonLdNodes(doc) : null,
-    pubWellKnown: get(u.origin + "/.well-known/site.standard.publication")
+  const isRoot = u.pathname === "/" || u.pathname === "";
+  const c = { url, origin: u.origin, host: u.hostname, mode: s.scope, get, home: null, post: null, pages: [] };
+  c.pubWellKnown = get(u.origin + "/.well-known/site.standard.publication");
+  c.robots = memo(() => get(u.origin + "/robots.txt"));
+  c.catalog = memo(async () => {
+    const h = c.pages.flatMap(P => P.rels("ai-catalog"))[0]?.href;
+    const r = await get(h || c.origin + "/.well-known/ai-catalog.json");
+    if (r.error) return { error: "unreachable" };
+    if (r.status !== 200) return { error: `HTTP ${r.status}` };
+    try { return { data: JSON.parse(r.text) }; } catch { return { error: "not valid JSON" }; }
+  });
+  // Every feed the site offers: advertised ones plus the usual paths, de-duplicated by content.
+  c.feedsData = memo(async () => {
+    const advertised = c.pages.flatMap(P => P.rels("alternate", FEED_TYPES).map(f => f.href));
+    const cands = uniq([...advertised, ...["/feed.xml", "/feed.json", "/feed", "/rss.xml", "/atom.xml", "/index.xml", "/jsonfeed", "/feed/json"].map(p => c.origin + p)]);
+    const fetched = await Promise.all(cands.map(async url => ({ url, r: await get(url) })));
+    const found = [], seen = new Set();
+    for (const { url, r } of fetched) {
+      if (r.status !== 200) continue;
+      const f = parseFeed(r.text);
+      if (!f) continue;
+      const sig = `${f.kind}|${f.title}|${f.items[0]?.link}`;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      found.push({ url, res: r, ...f });
+    }
+    return { found, tried: cands.length, unreachable: fetched.every(x => x.r.error) };
+  });
+  // The URL a standard.site document record points to: canonicalUrl, or the publication URL plus path.
+  c.docRecordUrl = async v => {
+    if (v.canonicalUrl) return v.canonicalUrl;
+    if (!v.path) return null;
+    let base = /^https?:/.test(v.site || "") ? v.site : null;
+    if (!base) { const pub = parseAtUri(v.site || "") ? v.site : c.pubUri(); if (pub) { try { base = (await getRecord(pub)).url; } catch {} } }
+    return base ? new URL(v.path.replace(/^\//, ""), base.replace(/\/?$/, "/")).href : null;
   };
+  const factsCache = new Map();
+  c.facts = P => { if (!factsCache.has(P)) factsCache.set(P, gatherFacts(c, P)); return factsCache.get(P); };
+
+  // Pages: the entered page, plus the home page or a post in whole-site mode.
+  if (isRoot) c.home = await loadPage(c, "home", url, s.pasted, "Home page");
+  else if (s.scope === "site") [c.post, c.home] = await Promise.all([loadPage(c, "post", url, s.pasted, "Post"), loadPage(c, "home", u.origin + "/", "", "Home page")]);
+  else c.post = await loadPage(c, "post", url, s.pasted, "Post");
+  c.pages = [c.home, c.post].filter(Boolean);
+
+  if (s.scope === "site" && !c.post) {
+    // Find a post: the newest feed item on this site, or the first h-entry link on the home page.
+    const items = (await c.feedsData()).found.flatMap(f => f.items.map(i => { try { return new URL(i.link, f.url).href; } catch { return null; } }));
+    const fromPage = c.home.doc ? [...c.home.doc.querySelectorAll(".h-entry .u-url[href], .h-entry a[href], article a[href]")].map(a => c.home.abs(a.getAttribute("href"))) : [];
+    const postUrl = [...items, ...fromPage].find(h => { try { const x = new URL(h); return sameHost(x.hostname, c.host) && x.pathname.length > 1; } catch { return false; } });
+    if (postUrl) { c.post = await loadPage(c, "post", postUrl, "", "Post"); c.pages.push(c.post); }
+  }
   const wk = await c.pubWellKnown;
   const wkUri = !wk.error && wk.status === 200 ? parseAtUri(wk.text)?.uri : null;
-  c.pubUri = () => wkUri || parseAtUri(doc?.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href") || "")?.uri || null;
+  c.pubUri = () => wkUri || parseAtUri(c.pages.map(P => P.doc?.querySelector('link[rel="site.standard.publication"]')?.getAttribute("href")).find(Boolean) || "")?.uri || null;
+  lastPages = c.pages;
 
-  if (!doc) {
-    showNotice(pageRes.error
-      ? `Couldn't read the page: ${pageRes.error}. Checks that need the HTML are skipped. Turn on the proxy, or paste the page source under Fetching options.`
-      : `The page returned HTTP ${pageRes.status}. Checks that need the HTML are skipped.`);
-  } else if (pageRes.via === "proxy") {
-    showNotice("The page blocks cross-origin reads, so its HTML was fetched through the CORS proxy. That's normal for most sites and doesn't affect the score.");
+  if (stale()) return;
+  const unread = c.pages.filter(P => !P.doc);
+  if (unread.length) {
+    showNotice(unread.map(P => P.res.error
+      ? `Couldn't read the ${P.label.toLowerCase()}: ${P.res.error}. Checks that need its HTML are skipped. Set a proxy, or paste the page source under Fetching options.`
+      : `The ${P.label.toLowerCase()} returned HTTP ${P.res.status}. Checks that need its HTML are skipped.`).join(" "));
+  } else if (c.pages.some(P => P.res.via === "proxy")) {
+    showNotice("The site blocks cross-origin reads, so its HTML was fetched through the proxy. That's normal for most sites and doesn't affect the score.");
   }
 
   await Promise.all(CHECKS.map(async chk => {
     let r;
-    if (chk.doc && !doc) r = R.skip("Page HTML unavailable.");
-    else {
-      try { r = await chk.run(c); }
-      catch (e) { r = R.fail(`Check failed: ${e.message}`); }
-    }
+    try { r = await runCheck(chk, c); }
+    catch (e) { r = R.fail(`Check failed: ${e.message}`); }
+    if (stale()) return;
     renderRow(chk, r);
     renderSummary();
   }));
 
-  if (proxyTrouble && doc) showNotice(proxyTrouble + " Some checks couldn't run. Set a working proxy under Fetching options.");
-  const via = pageRes.via === "paste" ? "pasted HTML" : pageRes.via === "proxy" ? "fetched through proxy" : "fetched directly";
-  $("#target").innerHTML = `<strong>${esc(url)}</strong> · ${via} · ${new Date().toLocaleTimeString()}`;
+  if (stale()) return;
+  if (proxyTrouble && !unread.length) showNotice(proxyTrouble + " Some checks couldn't run. Set a working proxy under Fetching options.");
+  const via = c.pages[0]?.res.via === "paste" ? "pasted HTML" : c.pages.some(P => P.res.via === "proxy") ? "fetched through proxy" : "fetched directly";
+  $("#target").innerHTML = c.pages.map(P => `${esc(P.label)}: <strong>${esc(P.url)}</strong>`).join("<br>") + `<br>${via} · ${new Date().toLocaleTimeString()}`;
   $("#actions").hidden = false;
   const hasIssues = CHECKS.some(c => ["fail", "warn"].includes(results[c.id]?.status));
   $("#copyPrompt").disabled = !hasIssues;
   $("#copyPrompt").textContent = hasIssues ? "Copy fix prompt for an agent" : "Nothing to fix";
   $("#go").disabled = false;
-  try { history.replaceState(null, "", "?url=" + enc(url)); } catch {}
+  try { history.replaceState(null, "", `?url=${enc(url)}${s.scope === "page" ? "&scope=page" : ""}`); } catch {}
 }
 
 function showNotice(msg) { const n = $("#notice"); n.textContent = msg; n.hidden = false; }
 
 function markdownReport() {
-  const core = tally(CHECKS.filter(c => !SECTIONS.find(s => s.id === c.sec).optional));
+  const core = tally(coreChecks());
   const mark = { pass: "[x]", warn: "[~]", fail: "[ ]", skip: "[-]" };
-  const plain = s => String(s);
-  let out = `# Meta Checker report\n\n${lastUrl}\n\n**Score: ${core.pct ?? "–"}/100**\n`;
+  let out = `# Meta Checker report\n\n${lastPages.map(P => `- ${P.label}: ${P.url}`).join("\n")}\n\n**Score: ${core.pct ?? "–"}/100**\n`;
   SECTIONS.forEach(s => {
     const t = tally(CHECKS.filter(c => c.sec === s.id));
     out += `\n## ${s.name}${s.optional ? " (optional)" : ""}: ${t.pct ?? "–"}%\n\n`;
     CHECKS.filter(c => c.sec === s.id).forEach(c => {
       const r = results[c.id] || {};
-      out += `- ${mark[r.status] || "[ ]"} **${c.name}** (${W[c.w].toLowerCase()})${r.detail?.length ? ": " + r.detail.map(plain).join("; ") : ""}\n`;
-      if (r.fix && r.status !== "pass") out += `  - Fix: ${plain(r.fix)}\n`;
+      out += `- ${mark[r.status] || "[ ]"} **${c.name}** (${SCOPE[c.scope].toLowerCase()}, ${W[c.w].toLowerCase()})${r.detail?.length ? ": " + r.detail.join("; ") : ""}\n`;
+      if (r.fix && r.status !== "pass") out += `  - Fix: ${r.fix}\n`;
     });
   });
   return out;
@@ -877,18 +1458,18 @@ function markdownReport() {
 
 // A self-contained prompt a coding agent can act on in the site's repository.
 function agentPrompt() {
-  const page = new URL(lastUrl);
+  const site = new URL(lastUrl).origin;
   const issues = CHECKS.map(c => ({ c, r: results[c.id] || {}, sec: SECTIONS.find(s => s.id === c.sec) }))
     .filter(({ r }) => r.status === "fail" || r.status === "warn");
-  const unchecked = CHECKS.filter(c => results[c.id]?.status === "skip" && !/^Page HTML unavailable/.test(results[c.id].detail?.[0] || ""));
+  const unchecked = CHECKS.filter(c => results[c.id]?.status === "skip" && /couldn't|unavailable|needs the meta checker proxy/i.test(results[c.id].detail?.join(" ") || ""));
   if (!issues.length) return null;
-  // Header, CORS and negotiation fixes usually live in server or CDN config rather than templates.
-  const hosting = r => /Access-Control|Content-Type|serve it as|serve it with|Accept: text\/markdown|redirect to/i.test(r.fix || "");
+  // Header, CORS, redirect and negotiation fixes usually live in server or CDN config rather than templates.
+  const hosting = r => /Access-Control|Content-Type|serve it as|serve it with|Accept: text\/markdown|redirect|Vary|ETag|Last-Modified|TXT record/i.test(r.fix || "");
   const order = { 3: 0, 2: 1, 1: 2 };
   issues.sort((a, b) => (a.sec.optional - b.sec.optional) || (order[a.c.w] - order[b.c.w]));
 
   const item = ({ c, r, sec }) => {
-    let out = `- **${c.name}** (${sec.name}${sec.optional ? ", optional" : ""}; ${W[c.w].toLowerCase()}; currently ${r.status === "fail" ? "failing" : "a warning"})\n`;
+    let out = `- **${c.name}** (${sec.name}${sec.optional ? ", optional" : ""}; ${SCOPE[c.scope].toLowerCase()}; ${W[c.w].toLowerCase()}; currently ${r.status === "fail" ? "failing" : "a warning"})\n`;
     if (r.detail?.length) out += `  - Found: ${r.detail.map(d => d.replace(/\.$/, "")).join("; ")}\n`;
     if (r.fix) out += `  - Fix: ${r.fix}\n`;
     const refs = (r.links || []).filter(([l]) => !/validator|pds\.ls/i.test(l));
@@ -898,13 +1479,13 @@ function agentPrompt() {
   const content = issues.filter(i => !hosting(i.r));
   const server = issues.filter(i => hosting(i.r));
 
-  let out = `I ran a machine-readability check on ${lastUrl} and want you to fix the problems it found. The check covers feeds, microformats (h-entry), schema.org JSON-LD, OpenGraph, standard.site, the SocialSpec well-known files (socialspec.org) and agent-friendly formats.
+  let out = `I ran a machine-readability check on ${site} and want you to fix the problems it found. It checked ${lastPages.map(P => `the ${P.label.toLowerCase()} (${P.url})`).join(" and ")}. The check covers feeds, crawling, microformats, schema.org data, OpenGraph, the IndieWeb and fediverse, standard.site, the SocialSpec well-known files (socialspec.org), consistency between formats, and agent-friendly formats.
 
-Work in this repository, which builds or serves ${page.origin}. First work out how the site is built (static site generator, templates, layouts, config) and where its HTML <head>, feeds and static files come from. Apply each fix at the source, in the shared templates or config, so it applies to every page of that type, not just ${page.pathname}. Keep the existing style and conventions, don't remove metadata that already works, and use absolute URLs in metadata.
+Work in this repository, which builds or serves ${site}. First work out how the site is built (static site generator, templates, layouts, config) and where its HTML <head>, feeds and static files come from. Apply each fix at the source, in the shared templates or config, so it applies to every page of that type, not just the pages that were checked. Keep the existing style and conventions, don't remove metadata that already works, and use absolute URLs in metadata.
 
 `;
   if (content.length) out += `## Site content and templates\n\n${content.map(item).join("")}\n`;
-  if (server.length) out += `## Server, CDN or hosting configuration\n\nThese depend on response headers or request handling. Look for header rules in the repository first (for example \`_headers\`, \`netlify.toml\`, \`vercel.json\`, server config or CDN edge rules). If the setting lives outside the repository, tell me exactly what to change and where instead of guessing.\n\n${server.map(item).join("")}\n`;
+  if (server.length) out += `## Server, CDN, DNS or hosting configuration\n\nThese depend on response headers, redirects, request handling or DNS. Look for the relevant rules in the repository first (for example \`_headers\`, \`netlify.toml\`, \`vercel.json\`, server config or CDN edge rules). If the setting lives outside the repository, tell me exactly what to change and where instead of guessing.\n\n${server.map(item).join("")}\n`;
   if (unchecked.length) out += `## Couldn't be checked\n\nThe checker couldn't run these, so verify them by hand: ${unchecked.map(c => c.name).join(", ")}.\n\n`;
   out += `## When you're done
 
@@ -923,6 +1504,9 @@ async function copy(text, btn) {
 // ---------- wiring ----------
 $("#proxy").value = store.get("proxyUrl", DEFAULT_PROXY);
 $("#proxy").addEventListener("change", e => store.set("proxyUrl", e.target.value.trim()));
+const qs = new URLSearchParams(location.search);
+$("#scope").value = qs.get("scope") === "page" ? "page" : store.get("scope", "site");
+$("#scope").addEventListener("change", e => store.set("scope", e.target.value));
 $("#form").addEventListener("submit", e => { e.preventDefault(); const v = $("#url").value.trim(); if (v) run(v); });
 $("#copyMd").addEventListener("click", e => copy(markdownReport(), e.currentTarget));
 $("#copyLink").addEventListener("click", e => copy(location.href, e.currentTarget));
@@ -930,8 +1514,7 @@ $("#copyPrompt").addEventListener("click", e => copy(agentPrompt(), e.currentTar
 
 renderSkeleton();
 renderSummary();
-const qp = new URLSearchParams(location.search).get("url");
-if (qp) run(qp);
+if (qs.get("url")) run(qs.get("url"));
 })();
 </script>
 </body>

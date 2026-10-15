@@ -12,7 +12,7 @@
 
 import * as BunnySDK from "https://esm.sh/@bunny.net/edgescript-sdk@0.11.2";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 // Comma-separated origins allowed to call the proxy from a browser, or "*" for any.
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "*").split(",").map((s) => s.trim()).filter(Boolean);
 const MAX_BYTES = Number(Deno.env.get("MAX_BYTES") ?? 2_000_000);
@@ -27,7 +27,7 @@ type Report = {
   url: string;
   finalUrl: string;
   status: number;
-  redirects: { url: string; status: number }[];
+  redirects: { url: string; status: number; headers: Record<string, string> }[];
   headers: Record<string, string>;
   body: string | null;
   truncated: boolean;
@@ -147,7 +147,13 @@ async function inspect(rawUrl: string, incoming: Headers): Promise<Report> {
     if (res.status >= 300 && res.status < 400 && location) {
       await res.body?.cancel();
       if (hop >= MAX_REDIRECTS) throw new ProxyError(`More than ${MAX_REDIRECTS} redirects.`, 502);
-      redirects.push({ url: current.href, status: res.status });
+      // Keep the headers that matter for caching and negotiation on each hop.
+      const hopHeaders: Record<string, string> = {};
+      for (const h of ["location", "vary", "cache-control", "link", "strict-transport-security"]) {
+        const v = res.headers.get(h);
+        if (v) hopHeaders[h] = v;
+      }
+      redirects.push({ url: current.href, status: res.status, headers: hopHeaders });
       current = new URL(location, current);
       continue;
     }

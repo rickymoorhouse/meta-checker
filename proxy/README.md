@@ -11,7 +11,7 @@ GET /fetch?url=https://example.com/&accept=text/markdown
   "url": "https://example.com/",
   "finalUrl": "https://example.com/index.md",
   "status": 200,
-  "redirects": [{ "url": "https://example.com/", "status": 301 }],
+  "redirects": [{ "url": "https://example.com/", "status": 301, "headers": { "location": "/index.md", "vary": "Accept" } }],
   "headers": { "content-type": "text/markdown", "access-control-allow-origin": "*" },
   "body": "…",
   "truncated": false,
