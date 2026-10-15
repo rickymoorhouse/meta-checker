@@ -59,4 +59,4 @@ Then enter `http://127.0.0.1:8767` as the proxy under *Fetching options* in the 
 2. Set `ALLOWED_ORIGINS` if you want to restrict which origins can use it.
 3. Optionally, add a custom hostname such as `meta-proxy.rickymoorhouse.uk`.
 4. To deploy from GitHub, set the repository variable `BUNNY_PROXY_SCRIPT_ID` to the script's ID. `.github/workflows/deploy-proxy.yml` then publishes `proxy/main.ts` whenever anything under `proxy/` changes on `main`.
-5. Put the script's URL in `DEFAULT_PROXY` near the top of the script in `index.html`, so the checker uses it by default.
+5. Put the script's URL in `DEFAULT_PROXY` near the top of the script in `index.html`, so the checker uses it by default. The live proxy is `https://meta-checker-proxy-y667o.bunny.run`.
