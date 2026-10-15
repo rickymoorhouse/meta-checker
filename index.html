@@ -78,6 +78,7 @@ button {
 }
 button.ghost { background: transparent; color: var(--accent); }
 button:disabled { opacity: 0.6; cursor: progress; }
+.actions button:disabled { cursor: default; }
 details.settings { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 details.settings summary { cursor: pointer; padding: 10px 14px; font-weight: 500; color: var(--muted); }
 .settings-body { padding: 4px 14px 16px; display: grid; gap: 14px; }
@@ -199,6 +200,7 @@ footer p { margin: 0; }
       <div class="target" id="target">No page checked yet. The checklist below shows what will be tested.</div>
       <div id="bars"></div>
       <div class="actions" id="actions" hidden>
+        <button type="button" id="copyPrompt">Copy fix prompt for an agent</button>
         <button type="button" class="ghost" id="copyMd">Copy report as Markdown</button>
         <button type="button" class="ghost" id="copyLink">Copy link to this check</button>
       </div>
@@ -490,7 +492,7 @@ const CHECKS = [
       const links = [["JSON Feed validator", `https://validator.jsonfeed.org/?url=${enc(u)}`]];
       const d = [`\`${u}\`${viaNote(r)}`, `Version \`${f.version}\`, ${f.items ?? 0} items${f.title ? `, titled “${trunc(f.title, 60)}”` : ""}`];
       if (!f.valid) return R.warn(d, "A valid feed needs a jsonfeed.org `version`, a `title` and an `items` array.", { links });
-      if (!disc.length) return R.warn(d.concat("Not linked from the page."), "Add `<link rel=\"alternate\" type=\"application/feed+json\" href=\"…\">`.", { links });
+      if (!disc.length) return R.warn(d.concat("Not linked from the page."), `Add \`<link rel="alternate" type="application/feed+json" href="${u}">\` to \`<head>\`.`, { links });
       return R.pass(d, { links });
     }
     if (unreachable(reached)) return R.skip("Couldn't check: feed locations were blocked by CORS and the proxy failed.");
@@ -847,6 +849,9 @@ async function run(rawUrl) {
   const via = pageRes.via === "paste" ? "pasted HTML" : pageRes.via === "proxy" ? "fetched through proxy" : "fetched directly";
   $("#target").innerHTML = `<strong>${esc(url)}</strong> · ${via} · ${new Date().toLocaleTimeString()}`;
   $("#actions").hidden = false;
+  const hasIssues = CHECKS.some(c => ["fail", "warn"].includes(results[c.id]?.status));
+  $("#copyPrompt").disabled = !hasIssues;
+  $("#copyPrompt").textContent = hasIssues ? "Copy fix prompt for an agent" : "Nothing to fix";
   $("#go").disabled = false;
   try { history.replaceState(null, "", "?url=" + enc(url)); } catch {}
 }
@@ -870,6 +875,44 @@ function markdownReport() {
   return out;
 }
 
+// A self-contained prompt a coding agent can act on in the site's repository.
+function agentPrompt() {
+  const page = new URL(lastUrl);
+  const issues = CHECKS.map(c => ({ c, r: results[c.id] || {}, sec: SECTIONS.find(s => s.id === c.sec) }))
+    .filter(({ r }) => r.status === "fail" || r.status === "warn");
+  const unchecked = CHECKS.filter(c => results[c.id]?.status === "skip" && !/^Page HTML unavailable/.test(results[c.id].detail?.[0] || ""));
+  if (!issues.length) return null;
+  // Header, CORS and negotiation fixes usually live in server or CDN config rather than templates.
+  const hosting = r => /Access-Control|Content-Type|serve it as|serve it with|Accept: text\/markdown|redirect to/i.test(r.fix || "");
+  const order = { 3: 0, 2: 1, 1: 2 };
+  issues.sort((a, b) => (a.sec.optional - b.sec.optional) || (order[a.c.w] - order[b.c.w]));
+
+  const item = ({ c, r, sec }) => {
+    let out = `- **${c.name}** (${sec.name}${sec.optional ? ", optional" : ""}; ${W[c.w].toLowerCase()}; currently ${r.status === "fail" ? "failing" : "a warning"})\n`;
+    if (r.detail?.length) out += `  - Found: ${r.detail.map(d => d.replace(/\.$/, "")).join("; ")}\n`;
+    if (r.fix) out += `  - Fix: ${r.fix}\n`;
+    const refs = (r.links || []).filter(([l]) => !/validator|pds\.ls/i.test(l));
+    if (refs.length) out += `  - Reference: ${refs.map(([l, h]) => `[${l}](${h})`).join(", ")}\n`;
+    return out;
+  };
+  const content = issues.filter(i => !hosting(i.r));
+  const server = issues.filter(i => hosting(i.r));
+
+  let out = `I ran a machine-readability check on ${lastUrl} and want you to fix the problems it found. The check covers feeds, microformats (h-entry), schema.org JSON-LD, OpenGraph, standard.site, the SocialSpec well-known files (socialspec.org) and agent-friendly formats.
+
+Work in this repository, which builds or serves ${page.origin}. First work out how the site is built (static site generator, templates, layouts, config) and where its HTML <head>, feeds and static files come from. Apply each fix at the source, in the shared templates or config, so it applies to every page of that type, not just ${page.pathname}. Keep the existing style and conventions, don't remove metadata that already works, and use absolute URLs in metadata.
+
+`;
+  if (content.length) out += `## Site content and templates\n\n${content.map(item).join("")}\n`;
+  if (server.length) out += `## Server, CDN or hosting configuration\n\nThese depend on response headers or request handling. Look for header rules in the repository first (for example \`_headers\`, \`netlify.toml\`, \`vercel.json\`, server config or CDN edge rules). If the setting lives outside the repository, tell me exactly what to change and where instead of guessing.\n\n${server.map(item).join("")}\n`;
+  if (unchecked.length) out += `## Couldn't be checked\n\nThe checker couldn't run these, so verify them by hand: ${unchecked.map(c => c.name).join(", ")}.\n\n`;
+  out += `## When you're done
+
+Summarise what you changed, file by file. List anything you couldn't fix and why. Once deployed, the fixes can be confirmed by re-running the check: ${location.origin}${location.pathname}?url=${enc(lastUrl)}
+`;
+  return out;
+}
+
 async function copy(text, btn) {
   const label = btn.textContent;
   try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
@@ -883,6 +926,7 @@ $("#proxy").addEventListener("change", e => store.set("proxyUrl", e.target.value
 $("#form").addEventListener("submit", e => { e.preventDefault(); const v = $("#url").value.trim(); if (v) run(v); });
 $("#copyMd").addEventListener("click", e => copy(markdownReport(), e.currentTarget));
 $("#copyLink").addEventListener("click", e => copy(location.href, e.currentTarget));
+$("#copyPrompt").addEventListener("click", e => copy(agentPrompt(), e.currentTarget));
 
 renderSkeleton();
 renderSummary();

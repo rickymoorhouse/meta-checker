@@ -14,6 +14,10 @@ Based on [Machine-readable?](https://rickymoorhouse.uk/blog/2026/machine-readabi
 
 ## Usage
 
+Live at https://rickymoorhouse.github.io/meta-checker/.
+
+After a check, **Copy fix prompt for an agent** copies a prompt for a coding agent working in the site's repository. It lists every failing or warning item with what was found, the fix and spec references. Fixes for templates and content are listed separately from those that need server or CDN config, such as Content-Type, CORS and content negotiation.
+
 Open `index.html` in a browser, or host it anywhere static (for example GitHub Pages). To run a check on load, add `?url=https://example.com/post/` to the page address.
 
 ## CORS and the proxy
