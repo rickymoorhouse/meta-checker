@@ -12,9 +12,22 @@
 
 import * as BunnySDK from "https://esm.sh/@bunny.net/edgescript-sdk@0.11.2";
 
-const VERSION = "0.2.0";
-// Comma-separated origins allowed to call the proxy from a browser, or "*" for any.
-const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "*").split(",").map((s) => s.trim()).filter(Boolean);
+const VERSION = "0.2.1";
+// Origins allowed to call the proxy from a browser, or "*" for any. Entries can be separated by commas,
+// semicolons or whitespace, and are reduced to their origin, so quotes, trailing slashes and paths
+// (https://example.github.io/meta-checker/) are all fine.
+function parseOrigins(raw: string): string[] {
+  return raw.split(/[\s,;]+/).map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean).map((s) => {
+    if (s === "*" || s === "null") return s;
+    try {
+      return new URL(s).origin;
+    } catch {
+      return s.replace(/\/+$/, "");
+    }
+  });
+}
+const ALLOWED_ORIGINS = parseOrigins(Deno.env.get("ALLOWED_ORIGINS") ?? "*");
+const originAllowed = (origin: string | null) => ALLOWED_ORIGINS.includes("*") || (!!origin && ALLOWED_ORIGINS.includes(origin));
 const MAX_BYTES = Number(Deno.env.get("MAX_BYTES") ?? 2_000_000);
 const TIMEOUT_MS = Number(Deno.env.get("TIMEOUT_MS") ?? 10_000);
 const MAX_REDIRECTS = 5;
@@ -188,19 +201,18 @@ async function inspect(rawUrl: string, incoming: Headers): Promise<Report> {
 // ---------------------------------------------------------------------------
 // HTTP handler
 
+// Rejected origins still get CORS headers on their 403, so the browser can show why it was refused
+// instead of a generic network error. Only allowed origins are ever sent fetched content.
 function corsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("origin");
   const allowAll = ALLOWED_ORIGINS.includes("*");
-  const allowed = allowAll ? "*" : origin && ALLOWED_ORIGINS.includes(origin) ? origin : null;
-  return allowed
-    ? {
-      "access-control-allow-origin": allowed,
-      "access-control-allow-methods": "GET, OPTIONS",
-      "access-control-allow-headers": "x-forward-accept, x-forward-accept-language",
-      "access-control-max-age": "86400",
-      ...(allowAll ? {} : { vary: "origin" }),
-    }
-    : {};
+  return {
+    "access-control-allow-origin": allowAll ? "*" : origin ?? "*",
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "x-forward-accept, x-forward-accept-language",
+    "access-control-max-age": "86400",
+    ...(allowAll ? {} : { vary: "origin" }),
+  };
 }
 
 function json(req: Request, data: unknown, status = 200): Response {
@@ -216,8 +228,8 @@ async function handler(req: Request): Promise<Response> {
   if (req.method !== "GET") return json(req, { error: "Only GET is supported." }, 405);
 
   const origin = req.headers.get("origin");
-  if (origin && !ALLOWED_ORIGINS.includes("*") && !ALLOWED_ORIGINS.includes(origin)) {
-    return json(req, { error: `Origin ${origin} isn't allowed to use this proxy.` }, 403);
+  if (origin && !originAllowed(origin)) {
+    return json(req, { error: `Origin ${origin} isn't allowed to use this proxy.`, code: "origin_not_allowed", allowedOrigins: ALLOWED_ORIGINS }, 403);
   }
 
   if (pathname === "/" || pathname === "/health") {

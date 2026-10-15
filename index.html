@@ -303,12 +303,24 @@ async function viaMetaProxy(base, url, opts) {
   let res, data;
   try {
     res = await fetch(endpoint, { cache: "no-store", signal: ctl.signal });
-    data = await res.json();
   } catch (e) {
-    proxyTrouble = `The proxy at ${base} couldn't be reached.`;
+    // A network error here usually means the proxy refused this origin without CORS headers (older proxy
+    // versions did), is down, or timed out.
+    proxyTrouble = e.name === "AbortError"
+      ? `The proxy at ${base} didn't answer within 20 seconds.`
+      : `The proxy at ${base} couldn't be reached from ${location.origin}. If you've set ALLOWED_ORIGINS on the proxy, check that it includes ${location.origin}.`;
     return { error: "blocked by CORS or unreachable, and the proxy couldn't be reached", cors: null, via: "none" };
   } finally { clearTimeout(timer); }
-  // Errors here are about the target (invalid, private, timed out), not the proxy.
+  try { data = await res.json(); }
+  catch {
+    proxyTrouble = `The proxy at ${base} returned HTTP ${res.status} without a JSON report, so it's probably failing.`;
+    return { error: `the proxy failed (HTTP ${res.status})`, cors: null, via: "none" };
+  }
+  if (data.code === "origin_not_allowed") {
+    proxyTrouble = `The proxy refuses requests from ${location.origin}. Add it to the proxy's ALLOWED_ORIGINS setting${data.allowedOrigins ? ` (currently ${data.allowedOrigins.join(", ")})` : ""}.`;
+    return { error: `the proxy doesn't allow ${location.origin}`, cors: null, via: "none" };
+  }
+  // Other errors here are about the target (invalid, private, timed out), not the proxy.
   if (!res.ok) return { error: data.error || `proxy returned HTTP ${res.status}`, cors: null, via: "none" };
   const h = data.headers || {};
   const acao = h["access-control-allow-origin"];
@@ -1410,7 +1422,7 @@ async function run(rawUrl) {
   if (stale()) return;
   const unread = c.pages.filter(P => !P.doc);
   if (unread.length) {
-    showNotice(unread.map(P => P.res.error
+    showNotice((proxyTrouble ? proxyTrouble + " " : "") + unread.map(P => P.res.error
       ? `Couldn't read the ${P.label.toLowerCase()}: ${P.res.error}. Checks that need its HTML are skipped. Set a proxy, or paste the page source under Fetching options.`
       : `The ${P.label.toLowerCase()} returned HTTP ${P.res.status}. Checks that need its HTML are skipped.`).join(" "));
   } else if (c.pages.some(P => P.res.via === "proxy")) {
